@@ -85,12 +85,11 @@ public class MainActivity extends BaseActivity {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-
-        // 应用主题模式（必须在 setContentView 之前）
+        // 必须在 super.onCreate() 之前设置夜间模式，否则 DayNight 不会生效
         int darkMode = AppConfig.INSTANCE.getDarkMode() != null ? AppConfig.INSTANCE.getDarkMode() : 0;
         applyDarkMode(darkMode);
 
+        super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
         // 统计表格
