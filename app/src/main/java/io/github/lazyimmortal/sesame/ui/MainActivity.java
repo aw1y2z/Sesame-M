@@ -276,8 +276,7 @@ public class MainActivity extends BaseActivity {
                 AppConfig.INSTANCE.setDarkMode(mode);
                 swDarkMode.setEnabled(!checked);
                 if (AppConfig.save()) {
-                    applyDarkMode(mode);
-                    getDelegate().applyDayNight();
+                    applyRuntimeTheme(mode);
                 }
             });
 
@@ -285,8 +284,7 @@ public class MainActivity extends BaseActivity {
                 int mode = checked ? 2 : 1;
                 AppConfig.INSTANCE.setDarkMode(mode);
                 if (AppConfig.save()) {
-                    applyDarkMode(mode);
-                    getDelegate().applyDayNight();
+                    applyRuntimeTheme(mode);
                 }
             });
         }
@@ -678,5 +676,20 @@ public class MainActivity extends BaseActivity {
             default: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO; break;
         }
         androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(nightMode);
+    }
+
+    /** 运行时切换主题：setLocalNightMode + applyDayNight 直接刷新当前Activity */
+    private void applyRuntimeTheme(int mode) {
+        int nightMode;
+        switch (mode) {
+            case 0: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM; break;
+            case 2: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES; break;
+            default: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO; break;
+        }
+        // 同时更新全局默认值（后续新Activity使用）
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(nightMode);
+        // 给当前Activity设置本地模式并立即刷新
+        getDelegate().setLocalNightMode(nightMode);
+        getDelegate().applyDayNight();
     }
 }
