@@ -678,8 +678,6 @@ public class MainActivity extends BaseActivity {
             case 2: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES; break;
             default: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO; break;
         }
-        if (androidx.appcompat.app.AppCompatDelegate.getDefaultNightMode() != nightMode) {
-            androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(nightMode);
-        }
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(nightMode);
     }
 }
