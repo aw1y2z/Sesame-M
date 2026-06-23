@@ -276,13 +276,19 @@ public class MainActivity extends BaseActivity {
                 int mode = checked ? 0 : (swDarkMode.isChecked() ? 2 : 1);
                 AppConfig.INSTANCE.setDarkMode(mode);
                 swDarkMode.setEnabled(!checked);
-                if (AppConfig.save()) applyDarkMode(mode);
+                if (AppConfig.save()) {
+                    applyDarkMode(mode);
+                    recreate();
+                }
             });
 
             swDarkMode.setOnCheckedChangeListener((btn, checked) -> {
                 int mode = checked ? 2 : 1;
                 AppConfig.INSTANCE.setDarkMode(mode);
-                if (AppConfig.save()) applyDarkMode(mode);
+                if (AppConfig.save()) {
+                    applyDarkMode(mode);
+                    recreate();
+                }
             });
         }
 
