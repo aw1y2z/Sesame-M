@@ -86,6 +86,11 @@ public class MainActivity extends BaseActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // 应用主题模式（必须在 setContentView 之前）
+        int darkMode = AppConfig.INSTANCE.getDarkMode() != null ? AppConfig.INSTANCE.getDarkMode() : 0;
+        applyDarkMode(darkMode);
+
         setContentView(R.layout.activity_main);
 
         // 统计表格
@@ -252,6 +257,32 @@ public class MainActivity extends BaseActivity {
                     LanguageUtil.setLocal(this);
                     recreate();
                 }
+            });
+        }
+
+        // 设置Tab - 主题模式开关
+        Switch swDarkMode = findViewById(R.id.sw_dark_mode);
+        Switch swFollowSystem = findViewById(R.id.sw_follow_system);
+        if (swDarkMode != null && swFollowSystem != null) {
+            int darkMode = AppConfig.INSTANCE.getDarkMode() != null ? AppConfig.INSTANCE.getDarkMode() : 0;
+            boolean followSystem = (darkMode == 0);
+            boolean isDark = (darkMode == 2);
+
+            swFollowSystem.setChecked(followSystem);
+            swDarkMode.setChecked(isDark);
+            swDarkMode.setEnabled(!followSystem);
+
+            swFollowSystem.setOnCheckedChangeListener((btn, checked) -> {
+                int mode = checked ? 0 : (swDarkMode.isChecked() ? 2 : 1);
+                AppConfig.INSTANCE.setDarkMode(mode);
+                swDarkMode.setEnabled(!checked);
+                if (AppConfig.save()) applyDarkMode(mode);
+            });
+
+            swDarkMode.setOnCheckedChangeListener((btn, checked) -> {
+                int mode = checked ? 2 : 1;
+                AppConfig.INSTANCE.setDarkMode(mode);
+                if (AppConfig.save()) applyDarkMode(mode);
             });
         }
 
@@ -632,5 +663,17 @@ public class MainActivity extends BaseActivity {
             intent.putExtra("userName", userNameArray[index]);
         }
         startActivity(intent);
+    }
+
+    private void applyDarkMode(int mode) {
+        int nightMode;
+        switch (mode) {
+            case 0: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM; break;
+            case 2: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES; break;
+            default: nightMode = androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO; break;
+        }
+        if (androidx.appcompat.app.AppCompatDelegate.getDefaultNightMode() != nightMode) {
+            androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(nightMode);
+        }
     }
 }
