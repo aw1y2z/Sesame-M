@@ -277,7 +277,7 @@ public class MainActivity extends BaseActivity {
                 swDarkMode.setEnabled(!checked);
                 if (AppConfig.save()) {
                     applyDarkMode(mode);
-                    recreate();
+                    getDelegate().applyDayNight();
                 }
             });
 
@@ -286,7 +286,7 @@ public class MainActivity extends BaseActivity {
                 AppConfig.INSTANCE.setDarkMode(mode);
                 if (AppConfig.save()) {
                     applyDarkMode(mode);
-                    recreate();
+                    getDelegate().applyDayNight();
                 }
             });
         }
