@@ -120,8 +120,10 @@ public class Log {
                     .flattener(new PatternFlattener("{d HH:mm:ss.SSS} {t}: {m}"))
                     .build()).build();
 
-    // 开关文件路径 + 内存缓存（唯一真相源是文件）
-    private static final File SWITCH_FILE = new File(FileUtil.LOG_DIRECTORY_FILE, "log_switches.prop");
+    // 开关文件路径（懒加载，避免静态初始化顺序问题）
+    private static File getSwitchFile() {
+        return new File(FileUtil.LOG_DIRECTORY_FILE, "log_switches.prop");
+    }
     private static final Map<String, Boolean> switchCache = new ConcurrentHashMap<>();
     private static volatile boolean switchesLoaded = false;
 
@@ -129,14 +131,17 @@ public class Log {
         if (switchesLoaded) return;
         synchronized (switchCache) {
             if (switchesLoaded) return;
-            if (SWITCH_FILE.exists()) {
+            File switchFile = getSwitchFile();
+            if (switchFile.exists()) {
                 Properties props = new Properties();
-                try (FileInputStream fis = new FileInputStream(SWITCH_FILE)) {
+                try (FileInputStream fis = new FileInputStream(switchFile)) {
                     props.load(fis);
                     for (String key : props.stringPropertyNames()) {
                         switchCache.put(key, "true".equals(props.getProperty(key)));
                     }
-                } catch (Throwable ignored) {}
+                } catch (Throwable t) {
+                    System.err.println("Log: 加载开关状态失败: " + t.getMessage());
+                }
             }
             switchesLoaded = true;
         }
@@ -156,19 +161,41 @@ public class Log {
         switchCache.put(key, on);
         // 写文件持久化
         try {
+            File switchFile = getSwitchFile();
+            // 确保父目录存在
+            File dir = switchFile.getParentFile();
+            if (dir != null && !dir.exists() && !dir.mkdirs()) {
+                System.err.println("Log: 无法创建日志开关目录: " + dir.getAbsolutePath());
+                return;
+            }
+            
             Properties props = new Properties();
-            if (SWITCH_FILE.exists()) {
-                try (FileInputStream fis = new FileInputStream(SWITCH_FILE)) {
+            if (switchFile.exists()) {
+                try (FileInputStream fis = new FileInputStream(switchFile)) {
                     props.load(fis);
-                } catch (Throwable ignored) {}
+                } catch (Throwable t) {
+                    System.err.println("Log: 读取开关文件失败: " + t.getMessage());
+                }
             }
             props.setProperty(key, String.valueOf(on));
-            File dir = SWITCH_FILE.getParentFile();
-            if (dir != null && !dir.exists()) dir.mkdirs();
-            try (FileOutputStream fos = new FileOutputStream(SWITCH_FILE)) {
-                props.store(fos, null);
+            
+            // 使用临时文件+重命名方式，避免写入一半断电导致文件损坏
+            File tempFile = new File(dir, switchFile.getName() + ".tmp");
+            try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                props.store(fos, "Log switch states");
             }
-        } catch (Throwable ignored) {}
+            
+            // 原子替换
+            if (switchFile.exists()) {
+                switchFile.delete();
+            }
+            if (!tempFile.renameTo(switchFile)) {
+                System.err.println("Log: 保存开关文件失败: 无法重命名临时文件");
+            }
+        } catch (Throwable t) {
+            System.err.println("Log: 保存开关状态失败: " + key + "=" + on + ", 错误: " + t.getMessage());
+            t.printStackTrace();
+        }
     }
 
     public static void i(String s) {
