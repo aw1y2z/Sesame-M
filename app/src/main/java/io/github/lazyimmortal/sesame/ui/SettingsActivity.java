@@ -81,6 +81,7 @@ public class SettingsActivity extends BaseActivity {
         AntForestHuntTaskListMap.load();
         AntFarmDoFarmTaskListMap.load();
         AntFarmDrawMachineTaskListMap.load();
+        AntDodoTaskListMap.load();
         AntOceanAntiepTaskListMap.load();
         AntOceanFishBlackListMap.load();
         AntOrchardTaskListMap.load();
