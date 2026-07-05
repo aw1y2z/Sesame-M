@@ -38,7 +38,7 @@ public class AlipayMiniMarkHelper {
             //Log.other("getAlipayMiniMark 响应 -> mark:" + result);
             return result;
         } catch (Throwable e) {
-            Log.printStackTrace("获取alipayminimark失败: " + e.getMessage(), e);
+            //Log.printStackTrace("获取alipayminimark失败: " + e.getMessage(), e);
             return "";
         }
     }

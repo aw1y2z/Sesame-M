@@ -271,7 +271,7 @@ public class AntForestV2 extends ModelTask {
         modelFields.addField(energyPvp = new BooleanModelField("energyPvp", "1V1能量挑战 | 开关", false));
         modelFields.addField(collectWateringBubble = new BooleanModelField("collectWateringBubble", "收取金球", false));
         modelFields.addField(wateredFriendList = new SelectAndCountModelField("wateredFriendList", "统计 | 应被好友浇水", new LinkedHashMap<>(), AlipayUser::getList, "请填写被浇水次数(用于核对金球)"));
-        modelFields.addField(collectRobExpandEnergy = new IntegerModelField("collectRobExpandEnergy", "额外能量领取(大于该值收取)", 100, 0, 1000000));
+        modelFields.addField(collectRobExpandEnergy = new IntegerModelField("collectRobExpandEnergy", "倍卡额外能量(大于该值收取)", 100, 0, 1000000));
         modelFields.addField(expiredEnergy = new BooleanModelField("expiredEnergy", "收取过期能量", false));
         modelFields.addField(queryInterval = new StringModelField("queryInterval", "查询间隔(毫秒或毫秒范围)", "500-1000"));
         modelFields.addField(collectInterval = new StringModelField("collectInterval", "收取间隔" + "(毫秒或毫秒范围)", "1000" + "-1500"));
@@ -1712,7 +1712,7 @@ public class AntForestV2 extends ModelTask {
             // 可继续添加更多黑名单任务
 
             Set<String> whiteList = new HashSet<>();// 从黑名单中移除该任务
-            //whiteList.add("逛一芝麻树");
+            whiteList.add("逛农场得落叶肥料");
             // 可继续添加更多白名单任务
             for (String task : blackList) {
                 AntForestVitalityTaskListMap.add(task, task);
@@ -1807,7 +1807,7 @@ public class AntForestV2 extends ModelTask {
             // 可继续添加更多黑名单任务
 
             whiteList = new HashSet<>();// 从黑名单中移除该任务
-            //whiteList.add("逛一芝麻树");
+            whiteList.add("消耗活力值得机会");
             // 可继续添加更多白名单任务
             for (String task : blackList) {
                 AntForestHuntTaskListMap.add(task, task);
@@ -2338,7 +2338,7 @@ public class AntForestV2 extends ModelTask {
     private Boolean doForsetTaskList(JSONArray taskInfoList) {
         boolean doubleCheck = false;
         try {
-            if (taskInfoList == null ||taskInfoList.length() == 0) {
+            if (taskInfoList == null || taskInfoList.length() == 0) {
                 return doubleCheck;
             }
             for (int j = 0; j < taskInfoList.length(); j++) {
@@ -2364,6 +2364,7 @@ public class AntForestV2 extends ModelTask {
                         if (childTaskTypeList != null && childTaskTypeList.length() > 0) {
                             doChildTask(childTaskTypeList, taskTitle);
                             doubleCheck = true;
+                            continue;
                         }
                     }
 
@@ -2371,9 +2372,10 @@ public class AntForestV2 extends ModelTask {
                         JSONArray childTaskTypeList = taskInfo.optJSONArray("childTaskTypeList");
                         if (childTaskTypeList != null && childTaskTypeList.length() > 0) {
                             doChildTask(childTaskTypeList, taskTitle);
+                            continue;
                         }
                     }
-                    
+
                     doubleCheck = finishTask(sceneCode, taskType, taskTitle);
                 }
             }
@@ -2446,9 +2448,9 @@ public class AntForestV2 extends ModelTask {
                     if (returnData.contains("Energy")) {
                         Log.forest("森林任务🎖️领取[" + taskTitle + "]奖励#获得[" + incAwardCount + "g能量]");
                         Statistics.addData(Statistics.DataType.COLLECTED, incAwardCount);
+                    } else {
+                        Log.forest("森林任务🎖️领取[" + taskTitle + "]奖励#获得[" + incAwardCount + "活力值]");
                     }
-                } else {
-                    Log.forest("森林任务🎖️领取[" + taskTitle + "]奖励#获得[" + incAwardCount + "活力值]");
                 }
                 return true;
             }
@@ -2800,11 +2802,10 @@ public class AntForestV2 extends ModelTask {
                                     awardType = taskConfigResultVO.optString("awardType", awardType);
                                 }
                                 // 能量统计
-                                if ("能量".equals(awardType)||"ENERGY".equals(awardType)) {
-                                    Log.forest("森林乐园🎖️领取[" + title + "]奖励[能量" + incAwardCount + "g]");
+                                if ("能量".equals(awardType) || "ENERGY".equals(awardType)) {
+                                    Log.forest("森林乐园🎖️领取[" + title + "]奖励[" + incAwardCount + "g能量]");
                                     Statistics.addData(Statistics.DataType.COLLECTED, incAwardCount);
-                                }
-                                else{
+                                } else {
                                     Log.forest("森林乐园🎖️领取[" + title + "]奖励[" + awardType + "*" + incAwardCount + "]");
                                 }
                             }
