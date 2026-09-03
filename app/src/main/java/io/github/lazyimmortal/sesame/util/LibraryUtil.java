@@ -1,4 +1,5 @@
-package io.github.aw1y2z.sesame.util;
+// ⚠️ 注意：为了不让 libsesame.so 崩溃，此类必须保留在旧包名 io.github.lazyimmortal.sesame 下，请勿随意移动
+package io.github.lazyimmortal.sesame.util;
 
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -10,7 +11,6 @@ import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.ToastUtil;
 
 public class LibraryUtil {
-
     private static final String TAG = LibraryUtil.class.getSimpleName();
 
     public static String getLibSesamePath(Context context) {
@@ -44,9 +44,13 @@ public class LibraryUtil {
     public static Boolean doFarmDrawTimesTask(JSONObject task) {
         try {
             if (task == null) return false;
+
             String taskId = task.optString("taskId", "");
             String title = task.optString("title", "");
+
             Log.record("执行抽奖任务: " + title + " (taskId: " + taskId + ")");
+
+            // 抽奖任务通常可以执行
             return true;
         } catch (Exception e) {
             Log.printStackTrace(TAG, e);

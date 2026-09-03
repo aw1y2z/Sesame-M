@@ -61,7 +61,7 @@ import io.github.aw1y2z.sesame.rpc.bridge.RpcVersion;
 import io.github.aw1y2z.sesame.rpc.intervallimit.RpcIntervalLimit;
 import io.github.aw1y2z.sesame.util.ClassUtil;
 import io.github.aw1y2z.sesame.util.FileUtil;
-import io.github.aw1y2z.sesame.util.LibraryUtil;
+import io.github.lazyimmortal.sesame.util.LibraryUtil;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.NotificationUtil;
 import io.github.aw1y2z.sesame.util.PermissionUtil;
