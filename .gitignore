@@ -18,6 +18,9 @@ out/
 build/
 release/
 
+# AGP output-metadata (flavor build info)
+**/output-metadata.json
+
 # Local configuration file (sdk path, etc)
 local.properties
 

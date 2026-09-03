@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="io.github.lazyimmortal.sesame">
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -13,79 +12,66 @@
         tools:ignore="ScopedStorage" />
 
     <application
+        android:name=".SesameApplication"
         android:allowBackup="true"
         android:icon="@drawable/logo"
         android:label="@string/app_name"
+        android:description="@string/module_description"
         android:requestLegacyExternalStorage="true"
         android:roundIcon="@drawable/logo"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true"
         tools:targetApi="q">
 
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-
-        <meta-data
-            android:name="xposeddescription"
-            android:value="勿以恶小而为之，勿以善小而不为。" />
-
-        <meta-data
-            android:name="xposedminversion"
-            android:value="54" />
-
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposed_scopes" />
-
-
         <activity
-            android:name="io.github.lazyimmortal.sesame.ui.MainActivity"
+            android:name=".ui.miuix.MiuixMainActivity"
             android:exported="true"
-            android:resizeableActivity="true">
+            android:resizeableActivity="true"
+            tools:targetApi="n">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.miuix.MiuixSettingsActivity"
+            android:exported="true"
+            android:resizeableActivity="true"
+            tools:targetApi="n" />
+
+        <activity
+            android:name=".ui.miuix.MiuixExtensionsActivity"
+            android:exported="true"
+            android:resizeableActivity="true"
+            tools:targetApi="n" />
+
+        <activity
+            android:name=".ui.miuix.MiuixLogViewerActivity"
+            android:exported="true"
+            android:resizeableActivity="true"
+            tools:targetApi="n" />
+
+        <activity
+            android:name=".ui.miuix.MiuixFriendStatsActivity"
+            android:exported="false"
+            android:resizeableActivity="true" />
+
+        <activity
+            android:name=".ui.miuix.MiuixAboutActivity"
+            android:exported="false"
+            android:resizeableActivity="true" />
+
         <activity-alias
             android:name=".ui.MainActivityAlias"
             android:enabled="true"
             android:exported="true"
-            android:targetActivity="io.github.lazyimmortal.sesame.ui.MainActivity">
+            android:targetActivity="io.github.aw1y2z.sesame.ui.miuix.MiuixMainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
-
-        <activity
-            android:name="io.github.lazyimmortal.sesame.ui.AlphaActivity"
-            android:resizeableActivity="true"
-            tools:targetApi="n"
-            tools:ignore="MissingClass" />
-
-        <activity
-            android:name="io.github.lazyimmortal.sesame.ui.ExtensionsActivity"
-            android:resizeableActivity="true"
-            tools:targetApi="n" />
-
-        <activity
-            android:name="io.github.lazyimmortal.sesame.ui.NewSettingsActivity"
-            android:resizeableActivity="true"
-            tools:targetApi="n" />
-
-        <activity
-            android:name="io.github.lazyimmortal.sesame.ui.SettingsActivity"
-            android:resizeableActivity="true"
-            tools:targetApi="n" />
-
-        <activity
-            android:name="io.github.lazyimmortal.sesame.ui.HtmlViewerActivity"
-            android:resizeableActivity="true"
-            tools:targetApi="n" />
-
 
     </application>
 

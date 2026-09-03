@@ -23,45 +23,53 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build with Gradle
-        run: ./gradlew assembleRelease -P "version=${{ github.ref_name }}"
+      # Release tag 形如 v1.0.0，去除前导 v 后作为版本号
+      - name: Resolve version from tag
+        id: resolve_version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}"
 
-      # 步骤1：定位未签名APK并解析所在目录（核心修复）
+      - name: Build with Gradle
+        run: ./gradlew assembleRelease -P "version=${{ steps.resolve_version.outputs.VERSION }}"
+
+      # 步骤1：定位未签名APK并解析所在目录
       - name: Locate unsigned APKs and directories
         id: locate_unsigned_apks
         run: |
           # 查找Normal版本未签名APK并解析目录
           normal_unsigned=$(find app/build/outputs/apk/normal/release -name "*.apk" | head -n 1)
-          normal_dir=$(dirname "$normal_unsigned")  # 用Shell解析目录路径
-          
+          normal_dir=$(dirname "$normal_unsigned")
+
           # 查找Compatible版本未签名APK并解析目录
           compatible_unsigned=$(find app/build/outputs/apk/compatible/release -name "*.apk" | head -n 1)
-          compatible_dir=$(dirname "$compatible_unsigned")  # 用Shell解析目录路径
-          
+          compatible_dir=$(dirname "$compatible_unsigned")
+
           # 输出变量供后续步骤使用
           echo "normal_unsigned=$normal_unsigned" >> $GITHUB_OUTPUT
           echo "normal_dir=$normal_dir" >> $GITHUB_OUTPUT
           echo "compatible_unsigned=$compatible_unsigned" >> $GITHUB_OUTPUT
           echo "compatible_dir=$compatible_dir" >> $GITHUB_OUTPUT
 
-      # 步骤2：签名Normal版本APK（引用解析后的目录）
+      # 步骤2：签名Normal版本APK
       - name: Sign Normal APK
         id: sign_normal
         uses: ilharp/sign-android-release@v2
         with:
-          releaseDir: ${{ steps.locate_unsigned_apks.outputs.normal_dir }}  # 使用提前解析的目录
+          releaseDir: ${{ steps.locate_unsigned_apks.outputs.normal_dir }}
           signingKey: ${{ secrets.ANDROID_SIGNING_KEY }}
           keyAlias: ${{ secrets.ANDROID_KEY_ALIAS }}
           keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
           buildToolsVersion: 34.0.0
 
-      # 步骤3：签名Compatible版本APK（引用解析后的目录）
+      # 步骤3：签名Compatible版本APK
       - name: Sign Compatible APK
         id: sign_compatible
         uses: ilharp/sign-android-release@v2
         with:
-          releaseDir: ${{ steps.locate_unsigned_apks.outputs.compatible_dir }}  # 使用提前解析的目录
+          releaseDir: ${{ steps.locate_unsigned_apks.outputs.compatible_dir }}
           signingKey: ${{ secrets.ANDROID_SIGNING_KEY }}
           keyAlias: ${{ secrets.ANDROID_KEY_ALIAS }}
           keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -73,9 +81,9 @@ jobs:
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
           # 为Normal版本生成校验和
-          sha256sum ${{ steps.sign_normal.outputs.signedFile }} > "CHECKSUMS-Sesame-Normal-${{ github.ref_name }}.${{ env.SHORT_SHA }}-signed.sha256"
+          sha256sum ${{ steps.sign_normal.outputs.signedFile }} > "CHECKSUMS-Sesame-Normal-${{ steps.resolve_version.outputs.VERSION }}.${{ env.SHORT_SHA }}-signed.sha256"
           # 为Compatible版本生成校验和
-          sha256sum ${{ steps.sign_compatible.outputs.signedFile }} > "CHECKSUMS-Sesame-Compatible-${{ github.ref_name }}.${{ env.SHORT_SHA }}-signed.sha256"
+          sha256sum ${{ steps.sign_compatible.outputs.signedFile }} > "CHECKSUMS-Sesame-Compatible-${{ steps.resolve_version.outputs.VERSION }}.${{ env.SHORT_SHA }}-signed.sha256"
 
       # 步骤5：上传签名后的APK及校验和到Release
       - name: Upload signed assets to Release
@@ -85,8 +93,8 @@ jobs:
           files: |
             ${{ steps.sign_normal.outputs.signedFile }}
             ${{ steps.sign_compatible.outputs.signedFile }}
-            CHECKSUMS-Sesame-Normal-${{ github.ref_name }}.${{ env.SHORT_SHA }}-signed.sha256
-            CHECKSUMS-Sesame-Compatible-${{ github.ref_name }}.${{ env.SHORT_SHA }}-signed.sha256
+            CHECKSUMS-Sesame-Normal-${{ steps.resolve_version.outputs.VERSION }}.${{ env.SHORT_SHA }}-signed.sha256
+            CHECKSUMS-Sesame-Compatible-${{ steps.resolve_version.outputs.VERSION }}.${{ env.SHORT_SHA }}-signed.sha256
           tag_name: ${{ github.ref_name }}
           draft: false
           append_body: true
@@ -96,6 +104,7 @@ jobs:
 
             ${{ github.event.head_commit.message || github.event.pull_request.title || '无详细信息' }}
             > ## 下载说明
-              * Normal 为正常版本,适用于`Android 8.0`及以上的系统
-              * Compatible 为兼容版本,适用于`Android 7.0`不再向下兼容 参考minSDK24后续不再兼容`
+              * Normal 为正常版本,使用较新的依赖构建
+              * Compatible 为兼容版本,使用较低版本依赖构建,适用于较旧的运行环境
+              * 两者均要求`Android 8.0`(API 26)及以上系统
             > 倒卖必死全家

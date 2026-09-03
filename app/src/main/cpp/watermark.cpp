@@ -2,7 +2,7 @@
 #include <string>
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkTextNative(
+Java_io_github_aw1y2z_sesame_util_WatermarkUtil_getWatermarkTextNative(
         JNIEnv* env,
         jclass /* clazz */) {
     // 水印文本内容
@@ -11,7 +11,7 @@ Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkTextNative(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkAlphaNative(
+Java_io_github_aw1y2z_sesame_util_WatermarkUtil_getWatermarkAlphaNative(
         JNIEnv* env,
         jclass /* clazz */) {
     // 水印透明度 0-255
@@ -19,7 +19,7 @@ Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkAlphaNative(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkTextSizeNative(
+Java_io_github_aw1y2z_sesame_util_WatermarkUtil_getWatermarkTextSizeNative(
         JNIEnv* env,
         jclass /* clazz */) {
     // 水印文字大小 sp
@@ -27,7 +27,7 @@ Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkTextSizeNative
 }
 
 extern "C" JNIEXPORT jfloat JNICALL
-Java_io_github_lazyimmortal_sesame_util_WatermarkUtil_getWatermarkRotationNative(
+Java_io_github_aw1y2z_sesame_util_WatermarkUtil_getWatermarkRotationNative(
         JNIEnv* env,
         jclass /* clazz */) {
     // 水印旋转角度

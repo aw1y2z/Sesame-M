@@ -141,5 +141,6 @@
     <string name="consume_gold">Consume Gold</string>
     <string name="use_special_food">Use Special Food</string>
     <string name="one_click_setup">One Click Setup</string>
+    <string name="module_description">勿以恶小而为之，勿以善小而不为。</string>
 
 </resources>
