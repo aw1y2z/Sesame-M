@@ -81,12 +81,61 @@ import java.util.Calendar
 class MiuixMainActivity : MiuixBaseActivity() {
 
     var runTypeText by mutableStateOf("")
+
+    /** 可观察的激活状态：HomeTab 等页面订阅它，onServiceBind/广播更新时自动重组刷新 */
+    var uiRunType by mutableStateOf<RunType>(RunType.DISABLE)
     var statisticsText by mutableStateOf("")
     var hasPermission by mutableStateOf(false)
 
     private val handler = Handler(Looper.getMainLooper())
     private var isClick = false
-    private val titleRunner = Runnable { updateSubTitle(RunType.DISABLE) }
+
+    /** 激活探测已重试次数,上限见 MAX_RUN_TYPE_PROBE_TIMES */
+    private var runTypeProbeTimes = 0
+
+    private lateinit var titleRunner: Runnable
+
+    init {
+        /**
+         * 激活探测:仅当真实状态仍为 DISABLE 时才显示未激活,并在超时前周期性重试,
+         * 避免覆盖晚到的 onServiceBind 激活信号,也避免 XposedService 绑定较慢时误报未激活
+         */
+        titleRunner = Runnable {
+            if (ViewAppInfo.getRunType() == RunType.DISABLE) {
+                runTypeProbeTimes++
+                updateSubTitle(RunType.DISABLE)
+                if (runTypeProbeTimes < MAX_RUN_TYPE_PROBE_TIMES) {
+                    sendQueryBroadcast()
+                    handler.postDelayed(titleRunner, 3000)
+                }
+            } else {
+                runTypeProbeTimes = 0
+            }
+        }
+    }
+
+    companion object {
+        /** 最多探测次数:每次间隔 3 秒,共约 15 秒,覆盖 XposedService 冷启动绑定晚于 Activity 的情况 */
+        private const val MAX_RUN_TYPE_PROBE_TIMES = 5
+
+        /**
+         * 设备显示名:优先读市场名(如 Xiaomi 13)。
+         * 小米/红米及多数云手机、模拟器的 ro.product.model 只是内部型号编号(如 2211133C),
+         * 多设备会显示相同,须用 ro.product.marketname 才有人类可读名称。
+         */
+        fun getDeviceDisplayName(): String {
+            try {
+                val clazz = Class.forName("android.os.SystemProperties")
+                val get = clazz.getMethod("get", String::class.java)
+                val market = get.invoke(null, "ro.product.marketname") as? String
+                if (!market.isNullOrBlank()) {
+                    return market
+                }
+            } catch (_: Throwable) {
+            }
+            return Build.MODEL ?: Build.DEVICE ?: ""
+        }
+    }
 
     private val broadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -97,8 +146,9 @@ class MiuixMainActivity : MiuixBaseActivity() {
                     "io.github.aw1y2z.sesame.status" -> {
                         // 模块已被 LSPosed 启用并注入支付宝，标记为已激活
                         ViewAppInfo.setRunTypeByCode(RunType.MODEL.getCode())
-                        updateSubTitle(RunType.MODEL)
+                        runTypeProbeTimes = 0
                         handler.removeCallbacks(titleRunner)
+                        updateSubTitle(RunType.MODEL)
                         if (isClick) {
                             ToastUtil.show(context, "芝麻粒加载状态正常")
                             isClick = false
@@ -119,6 +169,7 @@ class MiuixMainActivity : MiuixBaseActivity() {
         // runType 被模块置为 MODEL（onModuleLoaded）时立即刷新界面，无需手动加载配置
         ViewAppInfo.setRunTypeListener {
             runOnUiThread {
+                handler.removeCallbacks(titleRunner)
                 updateSubTitle(ViewAppInfo.getRunType())
             }
         }
@@ -139,16 +190,14 @@ class MiuixMainActivity : MiuixBaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 激活状态探测独立于存储权限：防止 titleRunner 重复累积，先清空再启动
+        if (RunType.DISABLE == ViewAppInfo.getRunType()) {
+            handler.removeCallbacks(titleRunner)
+            runTypeProbeTimes = 0
+            sendQueryBroadcast()
+            handler.postDelayed(titleRunner, 3000)
+        }
         if (hasPermission) {
-            if (RunType.DISABLE == ViewAppInfo.getRunType()) {
-                handler.postDelayed(titleRunner, 3000)
-                try {
-                    sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.status"))
-                } catch (th: Throwable) {
-                    Log.i("view sendBroadcast status err:")
-                    Log.printStackTrace(th)
-                }
-            }
             try {
                 Statistics.load()
                 Statistics.updateDay(Calendar.getInstance())
@@ -160,6 +209,7 @@ class MiuixMainActivity : MiuixBaseActivity() {
     }
 
     fun updateSubTitle(runType: RunType) {
+        uiRunType = runType
         runTypeText = when (runType) {
             RunType.DISABLE -> ViewAppInfo.getAppTitle() + "【" + getString(R.string.disable) + "】"
             RunType.MODEL -> ViewAppInfo.getAppTitle() + "【" + getString(R.string.activated) + "】"
@@ -173,6 +223,26 @@ class MiuixMainActivity : MiuixBaseActivity() {
             sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.status"))
         } catch (th: Throwable) {
             Log.i("view sendBroadcast status err:")
+            Log.printStackTrace(th)
+        }
+    }
+
+    /** 向支付宝进程查询本模块注入状态（不弹 Toast），由 titleRunner 周期性调用 */
+    fun sendQueryBroadcast() {
+        try {
+            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.status"))
+        } catch (th: Throwable) {
+            Log.i("view sendBroadcast status err:")
+            Log.printStackTrace(th)
+        }
+    }
+
+    /** 通知支付宝进程重载共享配置（日志开关等），使开关在注入进程中即时生效 */
+    fun broadcastReloadConfig() {
+        try {
+            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.reloadConfig"))
+        } catch (th: Throwable) {
+            Log.i("view sendBroadcast reloadConfig err:")
             Log.printStackTrace(th)
         }
     }
@@ -224,8 +294,15 @@ class MiuixMainActivity : MiuixBaseActivity() {
         return false
     }
 
+    override fun onPause() {
+        super.onPause()
+        // 离开前台即停止状态轮询，避免后台无谓广播与泄漏
+        handler.removeCallbacks(titleRunner)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        handler.removeCallbacks(titleRunner)
         try {
             unregisterReceiver(broadcastReceiver)
         } catch (_: Exception) {
@@ -298,7 +375,8 @@ fun MainScreen(activity: MiuixMainActivity) {
 @Composable
 fun HomeTab(activity: MiuixMainActivity) {
     val context = LocalContext.current
-    val activated = ViewAppInfo.getRunType() == RunType.MODEL
+    // 订阅 Compose state：onServiceBind / 状态广播到达时会自动重组刷新首页状态
+    val activated = activity.uiRunType == RunType.MODEL
     val appTitle = ViewAppInfo.getAppTitle()
     val version = ViewAppInfo.getAppVersion()
 
@@ -359,7 +437,7 @@ fun HomeTab(activity: MiuixMainActivity) {
         StatusRow("模块状态", if (activated) "已激活" else "未激活")
         StatusRow("版本", version)
         StatusRow("SDK API", Build.VERSION.SDK_INT.toString())
-        StatusRow("设备", Build.MODEL ?: Build.DEVICE ?: "")
+        StatusRow("设备", MiuixMainActivity.getDeviceDisplayName())
         StatusRow("系统架构", Build.SUPPORTED_ABIS?.firstOrNull() ?: "")
     }
     Spacer(Modifier.height(16.dp))
@@ -444,6 +522,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             forest = it
             AppConfig.INSTANCE.enableForestLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("forest")
         }
         var farm by remember { mutableStateOf(AppConfig.INSTANCE.enableFarmLog ?: true) }
@@ -451,6 +530,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             farm = it
             AppConfig.INSTANCE.enableFarmLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("farm")
         }
         var other by remember { mutableStateOf(AppConfig.INSTANCE.enableOtherLog ?: true) }
@@ -458,6 +538,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             other = it
             AppConfig.INSTANCE.enableOtherLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("other")
         }
     }
@@ -470,6 +551,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             debug = it
             AppConfig.INSTANCE.enableDebugLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("debug")
         }
         var error by remember { mutableStateOf(AppConfig.INSTANCE.enableViewErrorLog ?: true) }
@@ -477,6 +559,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             error = it
             AppConfig.INSTANCE.enableViewErrorLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("error")
         }
         var runtime by remember { mutableStateOf(AppConfig.INSTANCE.enableViewRuntimeLog ?: true) }
@@ -484,6 +567,7 @@ fun LogsTab(activity: MiuixMainActivity) {
             runtime = it
             AppConfig.INSTANCE.enableViewRuntimeLog = it
             AppConfig.save()
+            activity.broadcastReloadConfig()
             if (!it) FileUtil.clearLog("runtime")
         }
     }

@@ -1005,6 +1005,16 @@ public class ApplicationHook extends XposedModule {
                             Log.printStackTrace(TAG, th);
                         }
                         break;
+                    case "com.eg.android.AlipayGphone.sesame.reloadConfig":
+                        // UI 侧修改日志开关等共享配置后通知本进程重载,使开关即时生效
+                        try {
+                            AppConfig.load();
+                            Log.i(TAG, "reload AppConfig from UI");
+                        } catch (Throwable th) {
+                            Log.i(TAG, "sesame reloadConfig err:");
+                            Log.printStackTrace(TAG, th);
+                        }
+                        break;
                 }
             }
         }
@@ -1030,6 +1040,7 @@ public class ApplicationHook extends XposedModule {
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.reLogin");
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.status");
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.rpctest");
+            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.reloadConfig");
 
             broadcastReceiver = new AlipayBroadcastReceiver();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

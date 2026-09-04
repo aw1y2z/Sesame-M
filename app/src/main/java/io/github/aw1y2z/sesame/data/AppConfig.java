@@ -85,9 +85,11 @@ public class AppConfig {
         File appConfigFile = new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.json");
         try {
             if (appConfigFile.exists()) {
-                Log.i("加载APP配置");
                 String json = FileUtil.readFromFile(appConfigFile);
                 JsonUtil.copyMapper().readerForUpdating(INSTANCE).readValue(json);
+                // 注意：必须先加载文件再打印日志，否则开关判断仍取默认值 true，
+                // 导致「运行日志已关闭」时启动进程仍写入加载日志
+                Log.i("加载APP配置");
                 String formatted = toSaveStr();
                 if (formatted != null && !formatted.equals(json)) {
                     Log.i(TAG, "格式化APP配置");

@@ -131,6 +131,11 @@ public class Log {
     }
 
     public static void system(String tag, String s) {
+        // system 记录(配置加载/保存/重置等)同样受「查看运行日志」开关控制,
+        // 避免关闭运行日志后仍持续写入 system 日志
+        if (!io.github.aw1y2z.sesame.data.AppConfig.INSTANCE.getEnableViewRuntimeLog()) {
+            return;
+        }
         systemLogger.i(tag + ", " + s);
     }
 
