@@ -34,9 +34,10 @@ jobs:
           echo "version=${VERSION}"
 
       - name: Build with Gradle
-        run: ./gradlew assembleRelease -P "version=${{ steps.resolve_version.outputs.VERSION }}"
+        run: ./gradlew assembleNormalRelease -P "version=${{ steps.resolve_version.outputs.VERSION }}"
 
-      # 使用 build-tools 自带 apksigner 为两个 flavor 的 release APK 签名
+      # 使用 build-tools 自带 apksigner 为 normal flavor 的 ABI 拆分 release APK 签名
+      # 产物: universal(全架构兜底) + arm64-v8a + armeabi-v7a
       - name: Sign release APKs
         id: sign
         env:
@@ -54,11 +55,9 @@ jobs:
           echo "${ANDROID_SIGNING_KEY}" | base64 -d > "$RUNNER_TEMP/sesame-m-release.jks"
 
           mkdir -p "$RUNNER_TEMP/signed"
-          # 依次签名 normal 与 compatible 的 release APK
-          for flavor in normal compatible; do
-            APK_DIR="app/build/outputs/apk/$flavor/release"
-            APK_FILE=$(find "$APK_DIR" -name "*.apk" | head -n 1)
-            [ -n "$APK_FILE" ] || { echo "No APK found in $APK_DIR"; exit 1; }
+          # 签名 normal release 目录下的全部 ABI 拆分 APK
+          for APK_FILE in app/build/outputs/apk/normal/release/*.apk; do
+            [ -e "$APK_FILE" ] || { echo "No APK found in app/build/outputs/apk/normal/release"; exit 1; }
             APK_NAME=$(basename "$APK_FILE")
             echo "Signing $APK_NAME"
 
@@ -95,7 +94,9 @@ jobs:
 
             ${{ github.event.head_commit.message || github.event.pull_request.title || '无详细信息' }}
             > ## 下载说明
-              * Normal 为正常版本,使用较新的依赖构建
-              * Compatible 为兼容版本,使用较低版本依赖构建,适用于较旧的运行环境
-              * 两者均要求`Android 8.0`(API 26)及以上系统
+              * 按 ABI 拆分,请选择对应版本:
+                - `arm64-v8a`:64 位设备(绝大多数现代手机)
+                - `armeabi-v7a`:32 位旧设备
+                - `universal`:全架构兜底包,无法确定架构时使用
+              * 要求`Android 8.0`(API 26)及以上系统
             > 倒卖必死全家

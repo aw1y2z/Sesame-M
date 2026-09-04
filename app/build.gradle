@@ -46,15 +46,20 @@ android {
             dimension "default"
             ext.applicationType = "Normal"
         }
-        compatible {
-            dimension "default"
-            ext.applicationType = "Compatible"
-        }
     }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    // 按 ABI 拆分 APK：仅发布 arm 主流架构，保留 universal 全架构兜底包
+    splits {
+        abi {
+            enable true
+            reset()
+            include "armeabi-v7a", "arm64-v8a"
+            universalApk true
         }
     }
     sourceSets {
@@ -78,9 +83,15 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType('release')) { variant ->
-        variant.outputs.each { output ->
-            def appType = variant.name.startsWith('compatible') ? 'Compatible' : 'Normal'
-            output.outputFileName.set("Sesame-M-${appType}-${project.appVersion}.apk")
+        variant.outputs.forEach { output ->
+            // 按 ABI 区分产物名：arm64-v8a / armeabi-v7a；无 ABI filter 的为 universal 兜底包
+            String abiTag = "-universal"
+            output.getFilters().forEach { f ->
+                if (f.getFilterType().name() == 'ABI') {
+                    abiTag = "-" + f.getIdentifier()
+                }
+            }
+            output.outputFileName.set("Sesame-M-Normal${abiTag}-${project.appVersion}.apk")
         }
     }
 }
@@ -94,13 +105,9 @@ dependencies {
     implementation 'com.elvishew:xlog:1.11.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
-    normalImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-core', version: '2.18.2'
-    normalImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.18.2'
-    normalImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.18.2'
-
-    compatibleImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-core', version: '2.13.5'
-    compatibleImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.13.5'
-    compatibleImplementation group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.13.5'
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-core', version: '2.18.2'
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.18.2'
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.18.2'
 
     // NanoHTTPD 核心依赖（最新稳定版）
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
