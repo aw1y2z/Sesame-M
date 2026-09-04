@@ -87,6 +87,9 @@ class MiuixMainActivity : MiuixBaseActivity() {
     var statisticsText by mutableStateOf("")
     var hasPermission by mutableStateOf(false)
 
+    /** 统计版本号：load / 广播刷新后自增,首页 StatisticsTable 订阅它来触发重组 */
+    var statisticsVersion by mutableStateOf(0)
+
     private val handler = Handler(Looper.getMainLooper())
     private var isClick = false
 
@@ -156,8 +159,7 @@ class MiuixMainActivity : MiuixBaseActivity() {
                     }
 
                     "io.github.aw1y2z.sesame.update" -> {
-                        Statistics.load()
-                        statisticsText = Statistics.getText(this@MiuixMainActivity)
+                        refreshStatistics()
                     }
                 }
             }
@@ -197,14 +199,22 @@ class MiuixMainActivity : MiuixBaseActivity() {
             sendQueryBroadcast()
             handler.postDelayed(titleRunner, 3000)
         }
-        if (hasPermission) {
-            try {
-                Statistics.load()
-                Statistics.updateDay(Calendar.getInstance())
-                statisticsText = Statistics.getText(this)
-            } catch (e: Exception) {
-                Log.printStackTrace(e)
-            }
+        refreshStatistics()
+    }
+
+    /**
+     * 重新从统计文件加载并通知首页表格刷新。
+     * 基于可观察的 statisticsVersion 触发 Compose 重组,解决"首次进入首页统计为 0、
+     * 必须进入配置返回后才刷新"的问题(此前 StatisticsTable 直接读静态单例,单例变化不会重组)。
+     */
+    fun refreshStatistics() {
+        if (!hasPermission) return
+        try {
+            Statistics.load()
+            Statistics.updateDay(Calendar.getInstance())
+            statisticsVersion++
+        } catch (e: Exception) {
+            Log.printStackTrace(e)
         }
     }
 
@@ -380,6 +390,18 @@ fun HomeTab(activity: MiuixMainActivity) {
     val appTitle = ViewAppInfo.getAppTitle()
     val version = ViewAppInfo.getAppVersion()
 
+    // 进入首页即确认文件权限并加载统计;不依赖 onResume 与权限检查的时序,
+    // 直接进入首页也能正确显示,无需先进入配置再返回
+    DisposableEffect(Unit) {
+        if (!PermissionUtil.checkOrRequestFilePermissions(activity)) {
+            activity.hasPermission = false
+        } else {
+            activity.hasPermission = true
+        }
+        activity.refreshStatistics()
+        onDispose { }
+    }
+
     Text(
         text = "Sesame-M",
         fontSize = 32.sp,
@@ -444,7 +466,7 @@ fun HomeTab(activity: MiuixMainActivity) {
 
     SmallTitle(text = "数据统计")
     CardColumn {
-        StatisticsTable()
+        StatisticsTable(activity)
     }
     Spacer(Modifier.height(16.dp))
 }
@@ -464,7 +486,9 @@ fun StatusRow(label: String, value: String) {
 }
 
 @Composable
-fun StatisticsTable() {
+fun StatisticsTable(activity: MiuixMainActivity) {
+    // 订阅 statisticsVersion：load / 广播刷新后自增,触发本表重组读取最新单例数据
+    activity.statisticsVersion
     val rows = listOf(
         "收" to listOf(DataType.COLLECTED),
         "帮" to listOf(DataType.HELPED),
