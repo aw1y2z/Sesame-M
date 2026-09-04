@@ -1,0 +1,92 @@
+name: Release to Xposed-Modules-Repo
+
+# 主仓库发布 Release 后(由 Android CI 完成构建、签名并上传 APK),
+# 将同一批 APK 同步发布到 Xposed 模块仓库 Xposed-Modules-Repo/io.github.aw1y2z.sesame,
+# 与官方 bot 同步互为补充:bot 有扫描延迟,本流程在 CI 完成后立即发布。
+# 若官方 bot 已先创建同名 Release,则改为向该 Release 追加(覆盖)资产。
+
+on:
+  workflow_run:
+    workflows: ["Android CI"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      MAIN_REPO: aw1y2z/Sesame-M
+      XPOSED_REPO: Xposed-Modules-Repo/io.github.aw1y2z.sesame
+    steps:
+      - name: Resolve latest release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh release list --repo "$MAIN_REPO" --limit 1 --json tagName --jq '.[0].tagName')
+          if [ -z "$TAG" ]; then
+            echo "no release found in $MAIN_REPO"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download signed APKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p apks
+          gh release download "${{ steps.rel.outputs.tag }}" \
+            --repo "$MAIN_REPO" --dir apks --pattern '*.apk'
+          ls -l apks
+
+      - name: Read versionCode / versionName from APK
+        id: ver
+        run: |
+          set -euo pipefail
+          APK=$(ls apks/*.apk | head -n 1)
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$AAPT" ]; then
+            echo "aapt not found"
+            exit 1
+          fi
+          BADGING=$("$AAPT" dump badging "$APK" | head -n 1)
+          VERSION_CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")
+          VERSION_NAME=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          if [ -z "$VERSION_CODE" ] || [ -z "$VERSION_NAME" ]; then
+            echo "failed to parse version from APK"
+            exit 1
+          fi
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VERSION_CODE versionName=$VERSION_NAME"
+
+      - name: Prepare release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "${{ steps.rel.outputs.tag }}" \
+            --repo "$MAIN_REPO" --json body --jq .body > notes.md
+          wc -c notes.md
+
+      - name: Create or update release in Xposed-Modules-Repo
+        env:
+          GH_TOKEN: ${{ secrets.LSPOSED_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.code }}-${{ steps.ver.outputs.name }}"
+          if gh release view "$TAG" --repo "$XPOSED_REPO" >/dev/null 2>&1; then
+            echo "release $TAG already exists, uploading assets"
+            gh release upload "$TAG" apks/*.apk --repo "$XPOSED_REPO" --clobber
+          else
+            echo "creating release $TAG"
+            gh release create "$TAG" apks/*.apk \
+              --repo "$XPOSED_REPO" \
+              --title "${{ steps.ver.outputs.name }}" \
+              --notes-file notes.md
+          fi
