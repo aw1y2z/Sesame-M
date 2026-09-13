@@ -6,7 +6,6 @@ import androidx.lifecycle.Lifecycle
 import java.io.RandomAccessFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -113,28 +112,26 @@ class MiuixLogViewerActivity : MiuixBaseActivity() {
  * 日志详情页:展示指定类目的全部条目卡片。
  * 仿 LSPosed 日志界面:每条目一张卡(标签 + 时间 + 正文)。
  *
- * 进入页面即定位到最新一条,之后每 [LOG_REFRESH_INTERVAL_MS] 检查一次日志文件,
- * 有新内容就刷新并自动滚到最新,省去每次打印日志后手动滑到底部;
- * 用户上滑翻看历史时自动暂停跟随,滑回底部后自动恢复。
+ * 列表从底部开始排(reverseLayout),而列表初始位置就是最新一条,
+ * 所以一打开页面看到的就是最新日志;之后每 [LOG_REFRESH_INTERVAL_MS] 检查一次日志文件,
+ * 有新内容就刷新并跟到最新;上滑翻历史时暂停跟随(不会被新日志顶跑),滑回最新后自动恢复。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
     val context = LocalContext.current
     var entries by remember(logType) { mutableStateOf(loadLogEntries(logType.file)) }
-    // 每次加载到新内容后自增,作为「滚动到最新」的触发信号
+    // 每次刷新到新内容后自增,作为「把视角钉回最新一条」的触发信号
     var revision by remember(logType) { mutableStateOf(0) }
-    // 是否自动跟随最新日志:用户上滑查看历史时暂停,滑回底部后恢复
-    var followTail by remember(logType) { mutableStateOf(true) }
+    // 用户是否翻到历史里去了:是则不再自动跟随,免得看历史时被新日志顶跑
+    var browsingHistory by remember(logType) { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    // 滚动停下时按当前位置更新跟随状态。
-    // drop(1) 丢弃订阅时的初始值,否则刚进入页面(停在顶部)就会被判定为"用户已上滑"。
+    // 列表停下时按位置判断是否停在最新(索引 0):还能往回滚就说明用户翻到上面看历史了
     LaunchedEffect(listState, logType) {
         snapshotFlow { listState.isScrollInProgress }
-            .drop(1)
             .filter { !it }
-            .collect { followTail = !listState.canScrollForward }
+            .collect { browsingHistory = listState.canScrollBackward }
     }
 
     // 定时刷新:文件无变化时只做一次轻量的 length/lastModified 比较,不读盘也不重组
@@ -158,16 +155,11 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
         }
     }
 
-    // 新日志到达后滚到最新一条:离底部较远(刚进页面/从历史位置恢复跟随)时直接定位,近处则平滑滚动
+    // 有新日志时把视角钉回最新一条。
+    // 注意滚的是索引 0(最新那条所在位置),它恒定存在,不会像"滚到末尾"那样因列表尚未测量而失效。
     LaunchedEffect(revision) {
-        if (!followTail || entries.isEmpty()) {
-            return@LaunchedEffect
-        }
-        val lastIndex = entries.lastIndex
-        if (lastIndex - listState.firstVisibleItemIndex > NEAR_TAIL_ITEM_COUNT) {
-            listState.scrollToItem(lastIndex)
-        } else {
-            listState.animateScrollToItem(lastIndex)
+        if (!browsingHistory && entries.isNotEmpty()) {
+            listState.animateScrollToItem(0)
         }
     }
 
@@ -211,6 +203,9 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
         } else {
             LazyColumn(
                 state = listState,
+                // 从底部开始排:索引 0(最新那条)在屏幕最下方,而列表初始位置就是索引 0,
+                // 所以一打开页面看到的就是最新日志,不依赖任何"滚动到底部"的动作。
+                reverseLayout = true,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -218,7 +213,11 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                itemsIndexed(entries, key = { _, e -> "${e.lineNumber}-${e.hashCode()}" }) { _, entry ->
+                itemsIndexed(
+                    // 倒序传入(最新在前),配合 reverseLayout 后视觉上仍是"旧的在上面、最新在最下面"
+                    entries.asReversed(),
+                    key = { _, e -> "${e.lineNumber}-${e.hashCode()}" }
+                ) { _, entry ->
                     LogEntryCard(entry)
                 }
             }
@@ -342,9 +341,6 @@ fun LogTopBar(
 
 /** 日志自动刷新间隔(毫秒) */
 private const val LOG_REFRESH_INTERVAL_MS = 1000L
-
-/** 距列表底部超过该条目数时,滚到最新一条改为直接定位而非平滑滚动 */
-private const val NEAR_TAIL_ITEM_COUNT = 20
 
 /** 日志文件签名:长度 + 修改时间,用于判断文件是否有新内容 */
 private data class LogFileStamp(val length: Long, val modified: Long)
