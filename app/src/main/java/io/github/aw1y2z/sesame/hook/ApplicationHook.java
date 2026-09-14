@@ -244,12 +244,10 @@ public class ApplicationHook extends XposedModule {
                         String currentUid = UserIdMap.getCurrentUid();
                         if (!targetUid.equals(currentUid)) {
                             if (currentUid != null) {
-                                initHandler(true);
                                 Log.record("用户已切换");
                                 Toast.show("用户已切换");
-								new Thread(() -> {
+                                new Thread(() -> {
                                     try {
-                                        Thread.sleep(1000);
                                         initHandler(true);
                                     } catch (Throwable th) {
                                         Log.printStackTrace(TAG, th);
