@@ -37,7 +37,7 @@ public class UserIdMap {
     
     public synchronized static void initUser(String currentUserId) {
         setCurrentUserId(currentUserId);
-        new Thread(() -> {
+        ApplicationHook.getMainHandler().post(() -> {
             ClassLoader loader;
             try {
                 loader = ApplicationHook.getClassLoader();
@@ -52,7 +52,6 @@ public class UserIdMap {
                 Class<?> clsAliAccountDaoOp = loader.loadClass("com.alipay.mobile.socialcommonsdk.bizdata.contact.data.AliAccountDaoOp");
                 Object aliAccountDaoOp = XHelpers.callStaticMethod(clsUserIndependentCache, "getCacheObj", clsAliAccountDaoOp);
                 List<?> allFriends = (List<?>) XHelpers.callMethod(aliAccountDaoOp, "getAllFriends", new Object[0]);
-                List<UserEntity> selfEntityList = new ArrayList<>(1);
                 if (!allFriends.isEmpty()) {
                     Class<?> friendClass = allFriends.get(0).getClass();
                     Field userIdField = XHelpers.findField(friendClass, "userId");
@@ -61,6 +60,7 @@ public class UserIdMap {
                     Field nickNameField = XHelpers.findField(friendClass, "nickName");
                     Field remarkNameField = XHelpers.findField(friendClass, "remarkName");
                     Field friendStatusField = XHelpers.findField(friendClass, "friendStatus");
+                    UserEntity selfEntity = null;
                     for (Object userObject : allFriends) {
                         try {
                             String userId = (String) userIdField.get(userObject);
@@ -71,7 +71,7 @@ public class UserIdMap {
                             Integer friendStatus = (Integer) friendStatusField.get(userObject);
                             UserEntity userEntity = new UserEntity(userId, account, friendStatus, name, nickName, remarkName);
                             if (Objects.equals(selfId, userId)) {
-                                selfEntityList.add(userEntity);
+                                selfEntity = userEntity;
                             }
                             UserIdMap.add(userEntity);
                         } catch (Throwable t) {
@@ -79,17 +79,14 @@ public class UserIdMap {
                             Log.printStackTrace(t);
                         }
                     }
-                }
-                UserIdMap.save(selfId);
-                UserEntity selfEntity = selfEntityList.isEmpty() ? null : selfEntityList.get(0);
-                if (selfEntity != null) {
                     UserIdMap.saveSelf(selfEntity);
                 }
+                UserIdMap.save(selfId);
             } catch (Throwable t) {
                 Log.i("checkUnknownId.run err:");
                 Log.printStackTrace(t);
             }
-        }, "Sesame-InitUser").start();
+        });
     }
     
     public synchronized static void setCurrentUserId(String userId) {
