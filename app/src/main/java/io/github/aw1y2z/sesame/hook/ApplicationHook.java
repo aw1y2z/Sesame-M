@@ -244,9 +244,11 @@ public class ApplicationHook extends XposedModule {
                         String currentUid = UserIdMap.getCurrentUid();
                         if (!targetUid.equals(currentUid)) {
                             if (currentUid != null) {
-                                initHandler(true);
-                                Log.record("用户已切换");
-                                Toast.show("用户已切换");
+                                    ApplicationHook.getMainHandler().postDelayed(() -> {
+                                    Log.record("用户已切换");
+                                    Toast.show("用户已切换");
+                                    initHandler(true);
+                                }, 1000);
                                 return;
                             }
                             UserIdMap.initUser(targetUid);
