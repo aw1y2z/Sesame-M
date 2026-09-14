@@ -32,6 +32,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -244,16 +245,16 @@ public class ApplicationHook extends XposedModule {
                         String currentUid = UserIdMap.getCurrentUid();
                         if (!targetUid.equals(currentUid)) {
                             if (currentUid != null) {
-                                initHandler(true);
                                 Log.record("用户已切换");
                                 Toast.show("用户已切换");
-								new Thread(() -> {
+                                Future<?> future = UserIdMap.initUserAsync(targetUid);
+                                new Thread(() -> {
                                     try {
-                                        Thread.sleep(300);
-                                        initHandler(true);
-                                    } catch (Throwable th) {
-                                        Log.printStackTrace(TAG, th);
+                                        future.get(2, TimeUnit.SECONDS);
+                                    } catch (Exception e) {
+                                        Log.printStackTrace(TAG, e);
                                     }
+                                    initHandler(true);
                                 }, "Sesame-SwitchUser").start();
                                 return;
                             }
