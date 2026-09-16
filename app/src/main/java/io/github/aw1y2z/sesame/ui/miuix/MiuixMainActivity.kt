@@ -721,6 +721,22 @@ fun SettingsTab(activity: MiuixMainActivity) {
 
     SmallTitle(text = "系统设置")
     CardColumn {
+        // 文件权限申请引导
+        val hasFilePerm = activity.hasPermission
+        if (!hasFilePerm) {
+            ArrowPreference(
+                title = "申请文件权限",
+                summary = "模块需要文件权限才能正常运行",
+                onClick = {
+                    try {
+                        PermissionUtil.checkOrRequestFilePermissions(activity)
+                        activity.hasRequestedPermission = true
+                    } catch (e: Exception) {
+                        ToastUtil.show(context, "申请权限失败")
+                    }
+                }
+            )
+        }
         var iconHidden by remember { mutableStateOf(activity.isIconHidden()) }
         BooleanSwitch("隐藏图标", iconHidden) {
             activity.toggleHideIcon()
