@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -757,7 +758,11 @@ fun SettingsTab(activity: MiuixMainActivity) {
                     title = "立即申请权限",
                     onClick = {
                         try {
-                            PermissionUtil.checkOrRequestBatteryPermissions(context)
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                data = Uri.parse("package:" + "com.eg.android.AlipayGphone")
+                            }
+                            context.startActivity(intent)
                         } catch (e: Exception) {
                             ToastUtil.show(context, "申请权限失败")
                         }

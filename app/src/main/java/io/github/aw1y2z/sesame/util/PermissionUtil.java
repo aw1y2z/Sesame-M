@@ -148,24 +148,18 @@ public class PermissionUtil {
 
     public static Boolean checkOrRequestBatteryPermissions(Context context) {
         try {
+            if (context == null) {
+                return false;
+            }
             if (checkBatteryPermissions()) {
                 return true;
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 //跳转到权限页，请求权限
                 Intent appIntent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                appIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 appIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 appIntent.setData(Uri.parse("package:" + ClassUtil.PACKAGE_NAME));
-                //appIntent.setData(Uri.fromParts("package", ClassUtil.PACKAGE_NAME, null));
-                try {
-                    context.startActivity(appIntent);
-                } catch (ActivityNotFoundException ex) {
-                    Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                    intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    context.startActivity(intent);
-                }
+                context.startActivity(appIntent);
             }
         } catch (Exception e) {
             Log.printStackTrace(TAG, e);
