@@ -87,7 +87,7 @@ function Fmt-Default([string]$s) {
 # ---------- group code -> name ----------
 $groupName = @{}
 foreach ($l in (Get-Content -LiteralPath (Join-Path $root 'data\ModelGroup.java') -Encoding UTF8)) {
-    if ($l -match ',?\s*[A-Z]+\("([A-Z]+)",\s*"([^"]*)"') { $groupName[$matches[1]] = $matches[2] }
+    if ($l -match ',?\s*[A-Z_]+\("([A-Z_]+)",\s*"([^"]*)"') { $groupName[$matches[1]] = $matches[2] }
 }
 
 # ---------- model order ----------
@@ -123,15 +123,15 @@ foreach ($cls in $order) {
     $modelName = Get-ModelName $text $cls
 
     $grp = ''
-    $g = [regex]::Match($text, 'getGroup\s*\(\s*\)\s*\{[^}]*?ModelGroup\.([A-Z]+)')
-    if (-not $g.Success) { $g = [regex]::Match($text, 'ModelGroup\.([A-Z]+)') }
+    $g = [regex]::Match($text, 'getGroup\s*\(\s*\)\s*\{[^}]*?ModelGroup\.([A-Z_]+)')
+    if (-not $g.Success) { $g = [regex]::Match($text, 'ModelGroup\.([A-Z_]+)') }
     if ($g.Success) { $grp = $g.Groups[1].Value }
     $grpLabel = if ($groupName.ContainsKey($grp)) { $groupName[$grp] } else { $grp }
 
     [void]$out.Add("## $grpLabel | $modelName ($cls)")
     [void]$out.Add('')
-    [void]$out.Add('| 配置项 (code) | 显示名称 | 默认 / 范围 | 依赖 |')
-    [void]$out.Add('| --- | --- | --- | --- |')
+    # 表格行先攒着：有字段才补表头，避免出现只有表头的空表（如小镇模块无独立配置项）
+    $tbl = New-Object System.Collections.ArrayList
 
     $count = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -183,9 +183,16 @@ foreach ($cls in $order) {
         $codeCell = '`' + ($code -replace '\|', '\|') + '`'
         $label = $label -replace '\|', '\|'
         $def = $def -replace '\|', '\|'
-        [void]$out.Add("| $codeCell | $label | $def | $dep |")
+        [void]$tbl.Add("| $codeCell | $label | $def | $dep |")
         $count++
         $i = $j
+    }
+    if ($tbl.Count -gt 0) {
+        [void]$out.Add('| 配置项 (code) | 显示名称 | 默认 / 范围 | 依赖 |')
+        [void]$out.Add('| --- | --- | --- | --- |')
+        [void]$out.AddRange([string[]]$tbl)
+    } else {
+        [void]$out.Add('> 本模块无独立配置项，只有继承自 `Model` 的「开启」开关。')
     }
     [void]$out.Add('')
     $rows += $count
