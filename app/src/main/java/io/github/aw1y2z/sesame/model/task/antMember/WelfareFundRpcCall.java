@@ -13,15 +13,6 @@ public class WelfareFundRpcCall {
     /** 签到玩法 ID */
     private static final String SIGN_PLAY_ID = "PLAY100177545";
 
-    /** 福利金余额场景码 */
-    private static final String POINT_SCENE_CODE = "SUPER930";
-
-    /** 福利金余额（积分） */
-    public static String queryPointBalance() {
-        return ApplicationHook.requestString("com.alipay.loanpromoweb.promo.group.point.pointBanlanceV2",
-                "[{\"sceneCode\":\"" + POINT_SCENE_CODE + "\"}]");
-    }
-
     /** 签到：官方 operation=signConsult，服务端同时完成当日签到 */
     public static String signConsult() {
         return sign("signConsult", null);

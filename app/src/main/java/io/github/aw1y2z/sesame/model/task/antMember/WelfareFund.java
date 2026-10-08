@@ -14,7 +14,7 @@ import io.github.aw1y2z.sesame.util.TimeUtil;
 import io.github.aw1y2z.sesame.util.idMap.WelfareFundTaskListMap;
 
 /**
- * 网商银行福利金：余额、签到与任务闭环（报名 → 完成领奖）。
+ * 网商银行福利金：签到与任务闭环（报名 → 完成领奖）。
  * <p>权益兑换已移除：{@code member.benefits.queryItemsInMemberV2} 在模块线程里会被宿主判为
  * {@code XRiverNotFound}（同一方法在福利金页面内调用正常），列表与兑换链路不可用。
  */
@@ -57,27 +57,11 @@ public class WelfareFund {
     }
 
     public static void run(boolean sign, boolean task, boolean autoBlackList, Set<String> blackList) {
-        // 余额只读，福利金开启即展示，不单独设开关
-        queryBalance();
         if (sign) {
             signIn();
         }
         if (task) {
             runTasks(autoBlackList, blackList);
-        }
-    }
-
-    private static void queryBalance() {
-        try {
-            JSONObject jo = parse(WelfareFundRpcCall.queryPointBalance());
-            if (!ok(jo)) {
-                return;
-            }
-            JSONObject result = jo.optJSONObject("result");
-            int point = result != null ? result.optInt("pointBalance") : 0;
-            Log.other("福利金💰余额[" + point + "]");
-        } catch (Throwable t) {
-            Log.err(TAG, "queryPointBalance err:", t);
         }
     }
 
