@@ -9,6 +9,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import io.github.aw1y2z.sesame.hook.Toast;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.model.base.TaskAlternative;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
@@ -300,6 +302,15 @@ public class ForestChouChouLe {
      * @return 已成功或已触发（true 时调用方应 {@code doublecheck = true} 重拉列表核对）
      */
     private boolean chouChouLeFinishTask(String taskType, String taskSceneCode, String taskName, boolean xlight) {
+        // 做不了的当天只试一次、临时故障留待下一轮（见 TaskAttemptPolicy）
+        Outcome outcome = TaskAttemptPolicy.handle("forest::chouchoule::" + taskSceneCode + "/" + taskType, taskName, null,
+                () -> attemptChouChouLeTask(taskType, taskSceneCode, taskName, xlight), Log::forest,
+                new TaskAttemptPolicy.Site("AntForestHuntTaskList", "森林寻宝", taskType, taskSceneCode));
+        return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
+    }
+
+    /** 森林寻宝/抽抽乐完成上报：两种接口互为兜底，做不了不拉黑 */
+    private Outcome attemptChouChouLeTask(String taskType, String taskSceneCode, String taskName, boolean xlight) {
         try {
             JSONObject result = new JSONObject(xlight
                     ? AntForestRpcCall.finishTask4Chouchoule(taskType, taskSceneCode)
@@ -313,18 +324,21 @@ public class ForestChouChouLe {
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntForestHuntTaskList", taskName, result);
             if (MessageUtil.checkSuccess(TAG, result)) {
                 Log.forest("森林寻宝🧾完成[" + taskName + "]");
-                return true;
+                return Outcome.DONE;
             }
+            if (MessageUtil.isRetryable(result) || MessageUtil.isServerBusy(result)) {
+                return Outcome.RETRY;
+            }
+            // 不支持rpc调用（400000040）→ 由 TaskAttemptPolicy 代为伪申报
             if (TaskAlternative.hit(result, taskSceneCode)) {
-                TaskAlternative.trigger(null, taskType, taskName, taskType, taskSceneCode,
-                        "森林寻宝", msg -> Log.forest(msg));
-                return true;
+                return Outcome.UNSUPPORTED;
             }
             Log.other("森林寻宝⚠️未完成[" + taskName + "]#taskType=" + taskType);
+            return Outcome.UNABLE;
         } catch (Throwable t) {
             Log.err(TAG, "chouChouLeFinishTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
     }
 
     private String shareComponentRecall(String sceneCode, String shareId) {

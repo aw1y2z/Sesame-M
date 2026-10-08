@@ -22,6 +22,8 @@ import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.IntegerModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.entity.AlipayAntSportsTaskList;
 import io.github.aw1y2z.sesame.entity.WalkPathThemeMapList;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
@@ -499,6 +501,15 @@ public class AntSports extends ModelTask {
     }
 
     private Boolean completeTask(String taskAction, String taskId, String taskName, String sceneCode) {
+        // 做不了的当天只试一次、临时故障留待下一轮（见 TaskAttemptPolicy）
+        Outcome outcome = TaskAttemptPolicy.handle("sports::" + taskId, taskName, null,
+                () -> attemptCompleteTask(taskAction, taskId, taskName, sceneCode), Log::other,
+                new TaskAttemptPolicy.Site("AntSportsTaskList", "运动任务", taskId, sceneCode));
+        return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
+    }
+
+    /** 运动任务完成上报：不写任务黑名单；运动历史上从未出现 400000040，TaskAlternative 属休眠兜底 */
+    private Outcome attemptCompleteTask(String taskAction, String taskId, String taskName, String sceneCode) {
         try {
             JSONObject jo = new JSONObject(AntSportsRpcCall.completeTask(taskAction, taskId));
             //检查并标记黑名单任务
@@ -506,16 +517,20 @@ public class AntSports extends ModelTask {
             if (MessageUtil.checkSuccess(TAG, jo)) {
                 Log.other("运动任务🧾完成[得运动币:" + taskName + "]");
                 TimeUtil.sleep(1000);
-                return true;
+                return Outcome.DONE;
             }
-            // 另一种实现方案（见 TaskAlternative）；运动历史上从未出现 400000040，属休眠兜底
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+            // 不支持rpc调用（400000040）→ 由 TaskAttemptPolicy 代为伪申报
             if (TaskAlternative.hit(jo, sceneCode)) {
-                TaskAlternative.trigger(null, taskId, taskName, taskId, sceneCode, "运动任务", msg -> Log.other(msg));
+                return Outcome.UNSUPPORTED;
             }
+            return Outcome.UNABLE;
         } catch (Throwable t) {
             Log.err(TAG, "completeTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
     }
 
     private void signInCoinTask() {
@@ -2266,8 +2281,17 @@ public class AntSports extends ModelTask {
 
             for (int i = 0; i < tasks.length(); i++) {
                 JSONObject task = tasks.getJSONObject(i);
-                TimeUtil.sleep(TimeUnit.SECONDS.toMillis(task.getInt("viewSec")));
-                if (receiveBrowseReward(task)) {
+                String taskName = task.optString("title", "浏览商品15s得健康能量");
+                long viewMillis = TimeUnit.SECONDS.toMillis(task.getInt("viewSec"));
+                // 行为伪造：真人要"看够 viewSec 秒"，这里按服务端给的时长等待后领奖（服务端只认客户端等待）。
+                // 交给 TaskAttemptPolicy 管：同一天同一任务只伪造一次，失败不再每轮白等 15 秒
+                Outcome outcome = TaskAttemptPolicy.handle("sports::browse::" + taskName, taskName, null,
+                        () -> {
+                            TimeUtil.sleep(viewMillis);
+                            return receiveBrowseReward(task) ? Outcome.DONE : Outcome.UNABLE;
+                        },
+                        Log::other, new TaskAttemptPolicy.Site("AntSportsTaskList", "运动任务", taskName, ""));
+                if (outcome == Outcome.DONE) {
                     hasNewTask = true;
                 }
             }

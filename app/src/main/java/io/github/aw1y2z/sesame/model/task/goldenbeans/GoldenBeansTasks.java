@@ -11,6 +11,8 @@ import java.util.Set;
 import io.github.aw1y2z.sesame.data.ConfigV2;
 import io.github.aw1y2z.sesame.data.ModelFields;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.model.base.TaskAlternative;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
@@ -398,28 +400,42 @@ public final class GoldenBeansTasks {
             Log.i("金豆[" + entry.alias + "]任务⚠️[" + taskName + "]缺少taskId#跳过");
             return false;
         }
+        // 做不了的当天只试一次、临时故障留待下一轮（见 TaskAttemptPolicy）
+        // 兜底后的核对交给本模块的 verifyPendingTasks（TaskAlternative.verify），故 listField 传 null
+        Outcome outcome = TaskAttemptPolicy.handle("goldenbeans::" + entry.alias + "/" + taskId, taskName, null,
+                () -> attemptFinishTask(entry, taskId, taskName), msg -> Log.goldenBeans(msg), null);
+        return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
+    }
+
+    /** 任务提交：做不了的不拉黑、交给兜底方案；其它错误码才算真做不了（仍计入自动拉黑） */
+    private Outcome attemptFinishTask(GoldenBeansEntry entry, String taskId, String taskName) {
         try {
             JSONObject jo = GoldenBeansSupport.parse(goldenbeansRpcCall.submitTaskOf(
                     entry.bizType, entry.source, entry.taskSceneCode, taskId));
             if (GoldenBeansSupport.ok(jo)) {
                 Log.goldenBeans("金豆[" + entry.alias + "]任务🧾完成[" + taskName + "]");
-                return true;
+                return Outcome.DONE;
             }
             String failMessage = GoldenBeansSupport.describe(jo);
-            // 另一种实现方案（见 TaskAlternative）；乐园游戏类任务会被 finishTaskantorchard 以 400000040 拒绝
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+            // 另一种实现方案（见 TaskAlternative）；乐园游戏类任务会被 finishTaskantorchard 以 400000040 拒绝。
+            // 本模块自行伪申报并登记同轮核对（verifyPendingTasks），故返回 FORGED 而不是交给通用类
             if (TaskAlternative.hit(jo, entry.taskSceneCode)) {
                 TaskAlternative.trigger(pendingVerifyTasks, taskId, taskName, taskId, entry.taskSceneCode,
                         goldenbeansRpcCall.VERSION, "金豆[" + entry.alias + "]任务", msg -> Log.goldenBeans(msg));
-                return false;
+                return Outcome.FORGED;
             }
             // 其它错误码（支付/配置类）= 真做不了，仍计入自动拉黑
             MessageUtil.checkResultCodeAndMarkTaskBlackList("GoldenBeansTaskList", taskId, jo);
             Log.goldenBeans("金豆[" + entry.alias + "]任务⚠️[" + taskName + "]完成失败[" + failMessage + "]");
+            return Outcome.UNABLE;
         } catch (Throwable th) {
             Log.i(GoldenBeansSupport.TAG, "finishTask err:");
             Log.printStackTrace(GoldenBeansSupport.TAG, th);
         }
-        return false;
+        return Outcome.RETRY;
     }
 
     /**

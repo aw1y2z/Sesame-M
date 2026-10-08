@@ -321,12 +321,20 @@ public class MessageUtil {
         BLACKLIST_LIST_TARGETS.put("AntOceanFishBlackList", new String[]{"AntOcean", "神奇海洋去摸鱼任务"});
         BLACKLIST_LIST_TARGETS.put("AntOrchardTaskList", new String[]{"AntOrchard", "农场肥料任务"});
         BLACKLIST_LIST_TARGETS.put("OrchardChouChouLeTaskList", new String[]{"AntOrchard", "农场抽抽乐任务"});
-        BLACKLIST_LIST_TARGETS.put("WelfareFundTaskList", new String[]{"WelfareFund", "福利金任务"});
+        BLACKLIST_LIST_TARGETS.put("WelfareFundTaskList", new String[]{"AntMember", "福利金任务"});
         BLACKLIST_LIST_TARGETS.put("GoldenBeansTaskList", new String[]{"goldenbeans", "金豆夺宝任务"});
         BLACKLIST_LIST_TARGETS.put("AntStallTaskList", new String[]{"AntStall", "新村任务"});
         BLACKLIST_LIST_TARGETS.put("AntSportsTaskList", new String[]{"AntSports", "运动任务"});
         BLACKLIST_LIST_TARGETS.put("AntMemberTaskList", new String[]{"AntMember", "会员任务"});
         BLACKLIST_LIST_TARGETS.put("MemberCreditSesameTaskList", new String[]{"AntMember", "会员芝麻信用任务芝麻粒"});
+    }
+
+    /**
+     * 按列表字段名反查拉黑目标 {模块名, 列表中文名}；未登记的列表返回 null。
+     * <p>供模块外的通用逻辑（如 {@code TaskAttemptPolicy}）在判定"该任务做不了"时按规则记账。
+     */
+    public static String[] autoBlackListTarget(String listField) {
+        return BLACKLIST_LIST_TARGETS.get(listField);
     }
 
     /**
@@ -473,6 +481,11 @@ public class MessageUtil {
     public static void MarkTaskBlackList(String ModelFieldsType, String listTitle, String TaskListName, String taskTitle) {
         ConfigV2 config = ConfigV2.INSTANCE;
         ModelFields TaskModelFields = config.getModelFieldsMap().get(ModelFieldsType);
+        if (TaskModelFields == null) {
+            // BLACKLIST_LIST_TARGETS 的第一项必须是模型类名，写错时这里要能看到原因而不是 NPE
+            Log.record("添加" + TaskListName + "黑名单失败：" + taskTitle + "#未找到模块[" + ModelFieldsType + "]");
+            return;
+        }
         SelectModelField TaskSelectModelField = (SelectModelField) TaskModelFields.get(listTitle);
         if (TaskSelectModelField == null) {
             Log.record("添加" + TaskListName + "黑名单失败：" + taskTitle);

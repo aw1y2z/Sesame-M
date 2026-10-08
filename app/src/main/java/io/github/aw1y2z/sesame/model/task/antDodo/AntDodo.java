@@ -10,6 +10,8 @@ import io.github.aw1y2z.sesame.data.modelFieldExt.BooleanModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.entity.AlipayAntDodoTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayAntDodoTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
@@ -314,27 +316,39 @@ public class AntDodo extends ModelTask {
     }
 
     private Boolean finishTask(String sceneCode, String taskType, String taskTitle) {
+        //黑名单任务跳过
+        if (AntDodoTaskList.getValue().contains(taskTitle)) {
+            return false;
+        }
+        // 做不了的当天只试一次、临时故障留待下一轮（见 TaskAttemptPolicy）
+        Outcome outcome = TaskAttemptPolicy.handle("dodo::" + sceneCode + "/" + taskType, taskTitle, null,
+                () -> attemptFinishTask(sceneCode, taskType, taskTitle), Log::forest,
+                new TaskAttemptPolicy.Site("AntDodoTaskList", "神奇物种", taskType, sceneCode));
+        return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
+    }
+
+    /** 完成上报：做不了只记一行、不拉黑；物种暂无游戏类任务，TaskAlternative 属同型兜底 */
+    private Outcome attemptFinishTask(String sceneCode, String taskType, String taskTitle) {
         try {
-            //黑名单任务跳过
-            if (AntDodoTaskList.getValue().contains(taskTitle)) {
-                return false;
-            }
             JSONObject jo = new JSONObject(AntDodoRpcCall.finishTask(sceneCode, taskType));
             //检查并标记黑名单任务
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntDodoTaskList", taskTitle, jo);
             if (MessageUtil.checkSuccess(TAG, jo)) {
                 Log.forest("神奇物种🦕完成[" + taskTitle + "]");
-                return true;
+                return Outcome.DONE;
             }
-            // 另一种实现方案（见 TaskAlternative）；物种暂无游戏类任务，属同型兜底
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+            // 不支持rpc调用（400000040）→ 由 TaskAttemptPolicy 代为伪申报
             if (TaskAlternative.hit(jo, sceneCode)) {
-                TaskAlternative.trigger(null, taskType, taskTitle, taskType, sceneCode, "神奇物种", msg -> Log.forest(msg));
-                return false;
+                return Outcome.UNSUPPORTED;
             }
+            return Outcome.UNABLE;
         } catch (Throwable t) {
             Log.err(TAG, "finishTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
     }
 
     private void receiveTaskAward(String sceneCode, String taskType, String taskTitle) {

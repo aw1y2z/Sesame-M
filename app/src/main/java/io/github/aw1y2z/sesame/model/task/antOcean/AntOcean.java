@@ -10,6 +10,8 @@ import io.github.aw1y2z.sesame.data.modelFieldExt.BooleanModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.entity.AlipayAntOceanAntiepTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayAntOceanFishBlackList;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
@@ -966,23 +968,40 @@ public class AntOcean extends ModelTask {
             // 其余 TODO 一律尝试完成：原先按中文文案 + taskType 白名单精确分派，服务端一改文案
             // 或换个 taskType 变体就会整类任务一个请求都不发（列表拿到了却没动作、日志也没有）。
             // 做不了的由自动拉黑机制接管，避免用"服务端字符串精确相等"这种不稳定假设当开关
+            // 做不了的当天只试一次、临时故障留待下一轮（见 TaskAttemptPolicy）
+            Outcome outcome = TaskAttemptPolicy.handle("ocean::" + sceneCode + "/" + taskType, taskTitle, null,
+                    () -> attemptFinishOceanTask(sceneCode, taskType, taskTitle), Log::other,
+                    new TaskAttemptPolicy.Site("AntOceanAntiepTaskList", "海洋任务", taskType, sceneCode));
+            return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
+        } catch (Throwable t) {
+            Log.err(TAG, "finishOceanTask err:", t);
+        }
+        return false;
+    }
+
+    /** 海洋任务完成上报：做不了的只记一行、不拉黑；"不支持rpc"交给通用类伪申报 */
+    private static Outcome attemptFinishOceanTask(String sceneCode, String taskType, String taskTitle) {
+        try {
             JSONObject jo = new JSONObject(AntOceanRpcCall.finishTask(sceneCode, taskType));
             //检查并标记黑名单任务
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntOceanAntiepTaskList", taskTitle, jo);
             if (MessageUtil.checkSuccess(TAG, jo)) {
                 Log.other("海洋任务🧾完成[" + taskTitle + "]");
-                return true;
+                return Outcome.DONE;
             }
-            // 另一种实现方案（见 TaskAlternative）
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+            // 不支持rpc调用（400000040）→ 由 TaskAttemptPolicy 代为伪申报
             if (TaskAlternative.hit(jo, sceneCode)) {
-                TaskAlternative.trigger(null, taskType, taskTitle, taskType, sceneCode, "海洋任务", msg -> Log.other(msg));
-                return false;
+                return Outcome.UNSUPPORTED;
             }
             Log.other("海洋任务⚠️未完成[" + taskTitle + "]#taskType=" + taskType + "，需在支付宝内手动完成");
+            return Outcome.UNABLE;
         } catch (Throwable t) {
             Log.err(TAG, "finishOceanTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
     }
 
     // 海洋答题任务

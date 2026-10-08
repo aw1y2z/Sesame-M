@@ -21,6 +21,8 @@ import io.github.aw1y2z.sesame.data.ModelGroup;
 import io.github.aw1y2z.sesame.data.TokenConfig;
 import io.github.aw1y2z.sesame.data.modelFieldExt.*;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
 import io.github.aw1y2z.sesame.entity.CustomOption;
@@ -1746,13 +1748,17 @@ public class AntFarm extends ModelTask {
         return false;
     }
 
-    private Boolean doVideoTask(String title) {
+    /**
+     * 行为伪造：取视频 → 上报播放 → 等 15 秒 → 触发完成。
+     * <p>结论按 {@link Outcome} 分类，交由 {@link TaskAttemptPolicy} 决定当天是否再试。
+     */
+    private Outcome doVideoTask(String title) {
         try {
             JSONObject jo = new JSONObject(AntFarmRpcCall.queryTabVideoUrl());
             if (!MessageUtil.checkMemo(TAG, jo)) {
                 //检查并标记黑名单任务
                 MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
-                return false;
+                return retryableOrUnable(jo);
             }
             String videoUrl = jo.getString("videoUrl");
             String contentId = videoUrl.substring(videoUrl.indexOf("&contentId=") + 1, videoUrl.indexOf("&refer"));
@@ -1761,17 +1767,42 @@ public class AntFarm extends ModelTask {
                 TimeUtil.sleep(15100);
                 jo = new JSONObject(AntFarmRpcCall.videoTrigger(contentId));
                 if (jo.optBoolean("success")) {
-                    return true;
+                    return Outcome.DONE;
                 }
             }
             Log.record(jo.optString("resultMsg"));
             Log.i(jo.toString());
             //检查并标记黑名单任务
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
+            return retryableOrUnable(jo);
         } catch (Throwable t) {
             Log.err(TAG, "doVideoTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
+    }
+
+    /** 临时故障（102/限流/异常）按可重试处理，其余按做不了 */
+    private Outcome retryableOrUnable(JSONObject jo) {
+        return MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo) ? Outcome.RETRY : Outcome.UNABLE;
+    }
+
+    /** 视频任务的普通完成尝试：饲料任务的通用申报接口对它无效，失败即交给行为伪造（doVideoTask）接手 */
+    private Outcome attemptVideoTask(String title, String bizKey) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.doFarmTask(bizKey));
+            //检查并标记黑名单任务（此处是庄园饲料任务，应写入饲料黑名单而非抽抽乐）
+            MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
+            if (MessageUtil.checkResultCode(TAG, jo)) {
+                return Outcome.DONE;
+            }
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+        } catch (Throwable t) {
+            Log.err(TAG, "attemptVideoTask err:", t);
+            return Outcome.RETRY;
+        }
+        return Outcome.UNSUPPORTED;
     }
 
     private Boolean doAnswerTask(String title) {
@@ -1847,7 +1878,13 @@ public class AntFarm extends ModelTask {
             // 注意视频任务的标题实际是「看庄园小视频」——原先写的是 equals("庄园小视频")，
             // 少一个"看"字，导致这两类任务**从来没有走对过接口**（一直落到通用 doFarmTask 分支）
             if ("VIDEO_TASK".equals(taskId)) {
-                isDoTask = doVideoTask(title);
+                // 视频任务：普通申报接口做不了，必须把"观看行为"伪造出来（见 doVideoTask）。
+                // 由 TaskAttemptPolicy 管节流与失败分类：同一天同一任务只伪造一次，失败不再每轮白等 15 秒
+                Outcome outcome = TaskAttemptPolicy.handle("farm::video::" + title, title, null,
+                        () -> attemptVideoTask(title, bizKey), Log::farm,
+                        new TaskAttemptPolicy.Site("AntFarmDoFarmTaskList", "庄园饲料任务", bizKey, "",
+                                () -> doVideoTask(title) == Outcome.DONE));
+                isDoTask = outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
             } else if ("ANSWER".equals(taskId)) {
                 isDoTask = doAnswerTask(title);
             } else {
