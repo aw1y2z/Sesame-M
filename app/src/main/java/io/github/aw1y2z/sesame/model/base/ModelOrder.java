@@ -7,6 +7,7 @@ import io.github.aw1y2z.sesame.data.Model;
 import io.github.aw1y2z.sesame.model.extensions.ExtensionsHandle;
 import io.github.aw1y2z.sesame.model.normal.answerAI.AnswerAI;
 import io.github.aw1y2z.sesame.model.normal.base.BaseModel;
+import io.github.aw1y2z.sesame.model.task.ancientTree.AncientTree;
 import io.github.aw1y2z.sesame.model.task.antDodo.AntDodo;
 import io.github.aw1y2z.sesame.model.task.antFarm.AntFarm;
 import io.github.aw1y2z.sesame.model.task.antForest.AntForestV2;
@@ -17,6 +18,7 @@ import io.github.aw1y2z.sesame.model.task.antSports.AntSports;
 import io.github.aw1y2z.sesame.model.task.antStall.AntStall;
 import io.github.aw1y2z.sesame.model.task.greenFinance.GreenFinance;
 import io.github.aw1y2z.sesame.model.task.goldenbeans.goldenbeans;
+import io.github.aw1y2z.sesame.model.task.omegakoiTown.OmegakoiTown;
 import io.github.aw1y2z.sesame.model.task.protectEcology.ProtectEcology;
 import lombok.Getter;
 
@@ -32,6 +34,7 @@ public class ModelOrder {
         clazzList.add(AntStall.class);
         clazzList.add(AntOrchard.class);
         clazzList.add(ProtectEcology.class);
+        clazzList.add(AncientTree.class);
         clazzList.add(AntDodo.class);
         clazzList.add(AntOcean.class);
         clazzList.add(AntSports.class);
@@ -39,6 +42,7 @@ public class ModelOrder {
         clazzList.add(GreenFinance.class);
         clazzList.add(goldenbeans.class);
         clazzList.add(AnswerAI.class);
+        clazzList.add(OmegakoiTown.class);
 
         ExtensionsHandle.handleAlphaRequest("ModelOrder", "addExtensionsClass", clazzList);
     }
