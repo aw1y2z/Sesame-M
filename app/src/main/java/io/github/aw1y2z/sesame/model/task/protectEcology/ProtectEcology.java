@@ -39,7 +39,7 @@ public class ProtectEcology extends ModelTask {
     
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.FOREST;
+        return ModelGroup.PROTECT;
     }
     
     private static BooleanModelField cooperateWater;

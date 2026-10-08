@@ -31,7 +31,7 @@ public class AncientTree extends ModelTask {
 
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.FOREST;
+        return ModelGroup.PROTECT;
     }
 
     private BooleanModelField ancientTreeOnlyWeek;

@@ -42,7 +42,7 @@ public class AnswerAI extends Model {
 
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.OTHER;
+        return ModelGroup.ANSWER_AI;
     }
 
     /** 当前生效的自定义AI实现；未配置时为 null，表示不调用AI */

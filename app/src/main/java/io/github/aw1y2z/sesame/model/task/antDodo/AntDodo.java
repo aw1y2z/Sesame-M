@@ -45,7 +45,7 @@ public class AntDodo extends ModelTask {
 
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.FOREST;
+        return ModelGroup.SPECIES;
     }
 
     private BooleanModelField dodoTaskList;

@@ -43,7 +43,7 @@ public class GreenFinance extends ModelTask {
 
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.OTHER;
+        return ModelGroup.GREEN_FINANCE;
     }
 
     @Override

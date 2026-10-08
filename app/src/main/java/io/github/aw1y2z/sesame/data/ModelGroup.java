@@ -10,12 +10,17 @@ public enum ModelGroup {
 
     BASE("BASE", "基础", "svg/group/base.svg")
     , FOREST("FOREST", "森林", "svg/group/forest.svg")
+    , PROTECT("PROTECT", "保护", "svg/group/forest.svg")
+    , SPECIES("SPECIES", "物种", "svg/group/forest.svg")
+    , OCEAN("OCEAN", "海洋", "svg/group/forest.svg")
     , FARM("FARM", "庄园", "svg/group/farm.svg")
     , STALL("STALL", "新村", "svg/group/stall.svg")
     , ORCHARD("ORCHARD", "农场", "svg/group/orchard.svg")
     , GOLDENBEANS("GOLDENBEANS", "金豆", "svg/group/goldenbeans.svg")
     , SPORTS("SPORTS", "运动", "svg/group/sports.svg")
     , MEMBER("MEMBER", "会员", "svg/group/member.svg")
+    , GREEN_FINANCE("GREEN_FINANCE", "经营", "svg/group/other.svg")
+    , ANSWER_AI("ANSWER_AI", "AI答", "svg/group/other.svg")
     , OTHER("OTHER", "其他", "svg/group/other.svg")
 
     ;

@@ -61,7 +61,7 @@ public class AntOcean extends ModelTask {
      */
     @Override
     public ModelGroup getGroup() {
-        return ModelGroup.FOREST;
+        return ModelGroup.OCEAN;
     }
 
     private BooleanModelField queryTaskList;
