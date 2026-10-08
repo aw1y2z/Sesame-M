@@ -61,7 +61,6 @@ import io.github.aw1y2z.sesame.util.StringUtil
 import io.github.aw1y2z.sesame.util.ToastUtil
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
@@ -198,7 +197,6 @@ fun SettingsContent(activity: MiuixSettingsActivity, userId: String?) {
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
             // ============ 配置分组目录 ============
-            SmallTitle(text = "配置分组")
             CardColumn {
                 ModelGroup.values().forEach { g ->
                     if (Model.getGroupModelConfig(g).isNotEmpty()) {

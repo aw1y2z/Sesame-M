@@ -166,10 +166,14 @@ fun GroupFieldsContent(activity: MiuixGroupFieldsActivity, userId: String?, grou
     // 字段对象由 ConfigV2 单例持有，引用稳定；仅当分组或依赖版本变化时才重建。
     val rows = remember(group, depVersion) {
         val list = ArrayList<GroupFieldsRow>()
-        Model.getGroupModelConfig(group).values.forEach { mc ->
+        val modelConfigs = Model.getGroupModelConfig(group).values.filter { it.fields.isNotEmpty() }
+        // 分组独立后单模型组的小节标题与顶栏组名重复；多模型组才需要标题区分
+        val showHeader = modelConfigs.size > 1
+        modelConfigs.forEach { mc ->
             val fields = mc.fields.values.toList()
-            if (fields.isEmpty()) return@forEach
-            list.add(GroupFieldsRow.Header(key = "header:${mc.getCode()}", title = mc.name ?: ""))
+            if (showHeader) {
+                list.add(GroupFieldsRow.Header(key = "header:${mc.getCode()}", title = mc.name ?: ""))
+            }
             // 过滤：依赖父字段但父未激活的子字段
             val visibleFields = fields.filter { f ->
                 f.isVisible(mc)
