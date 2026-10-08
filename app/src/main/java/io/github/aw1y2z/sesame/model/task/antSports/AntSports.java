@@ -63,6 +63,7 @@ public class AntSports extends ModelTask {
     private IntegerModelField earliestSyncStepTime;
     private IntegerModelField latestExchangeTime;
     private IntegerModelField syncStepCount;
+    private IntegerModelField walkPaceMs;
     private BooleanModelField tiyubiz;
     private BooleanModelField club;
     private ChoiceModelField clubTrainItemType;
@@ -115,6 +116,9 @@ public class AntSports extends ModelTask {
         WalkPathThemeMapList.getList();
         modelFields.addField(PathThemeMapList = new ChoiceModelField("PathThemeMapList", "行走路线 | 路线主题", 0, WalkPathThemeMapList.nickNames).setDependsOn("walk"));
         modelFields.addField(walkMinimumCompleteCount = new BooleanModelField("walkMinimumCompleteCount", "全主题路线(选最少完成数) | 开启", false).setDependsOn("walk"));
+        modelFields.addField(walkPaceMs = new IntegerModelField("walkPaceMs", "行走路线 | 每步间隔(毫秒)", 50, 50, 2000)
+                .setDependsOn("walk")
+                .setDescription("每上报 1 步等待的毫秒数：默认 50ms≈20 步/秒（22000 步约 18 分钟），调大更保守；不限速的步频会被风控 1009 拦截，1009 后连只读查询都不可用"));
         //modelFields.addField(walkCustomPathIdList = new SelectModelField("walkCustomPathIdList", "行走路线 | 自定义路线列表", new LinkedHashSet<>(), WalkPath::getThemeListFromRpc, "请选择要行走的路线，选择多条则随机走其中一条"));
         modelFields.addField(sportsTasks = new BooleanModelField("sportsTasks", "运动任务", false));
         modelFields.addField(AutoAntSportsTaskList = new BooleanModelField("AutoAntSportsTaskList", "运动任务 | 自动黑名单", true).setDependsOn("sportsTasks"));
@@ -690,6 +694,21 @@ public class AntSports extends ModelTask {
         return minPathId;
     }
 
+    /**
+     * 行走限速：每上报 1 步等待 {@code walkPaceMs} 毫秒，把步频摊到"像人/像跑步"的量级。
+     * <p>分片等待（每片最长 5s）以便任务作废时能及时退出（{@link TimeUtil#sleep} 在作废时抛 TaskCancelledException）。
+     * <p>默认 50ms/步 ≈ 20 步/秒；不限速时单次上报数百到上千步、间隔仅 1 秒，这种步频会被风控 1009 拦截，
+     * 而 1009 之后连只读查询也不可用，代价远超一天的步数收益。
+     */
+    private void paceWalk(int useStepCount) {
+        long wait = (long) walkPaceMs.getValue() * Math.max(useStepCount, 0);
+        while (wait > 0) {
+            long slice = Math.min(wait, 5000L);
+            TimeUtil.sleep(slice);
+            wait -= slice;
+        }
+    }
+
     private void walk(int syncStepCount) {
         String goingPathId = queryGoingPathId();
         do {
@@ -810,6 +829,8 @@ public class AntSports extends ModelTask {
             if (MessageUtil.checkSuccess(TAG, jo)) {
                 result = true;
                 Log.i("行走路线🚶🏻‍♂️行走[" + pathName + "]#前进了" + useStepCount + "步");
+                // 按上报步数限速：不限速时上层 walk() 循环只 sleep(1000)，该步频会被风控 1009 拦截
+                paceWalk(useStepCount);
                 jo = jo.getJSONObject("data");
                 if (jo.has("completeInfo")) {
                     Log.other("行走路线🚶🏻‍♂️完成[" + pathName + "]");
