@@ -21,6 +21,12 @@ public class Toast {
     }
 
     public static void show(Context context, Handler handler, CharSequence cs) {
+        // Toast may be requested before the Service hook has initialized the main Handler.
+        // A null Handler must not turn a user-facing notification into a NullPointerException.
+        if (context == null || handler == null) {
+            Log.i(TAG, "skip toast: context or main handler is not ready");
+            return;
+        }
         try {
             handler.post(() -> {
                 try {
