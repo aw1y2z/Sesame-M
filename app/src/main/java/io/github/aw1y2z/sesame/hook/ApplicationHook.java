@@ -25,6 +25,7 @@ import io.github.aw1y2z.sesame.util.compat.XC_MethodHook;
 import io.github.aw1y2z.sesame.util.XHelpers;
 import io.github.aw1y2z.sesame.util.compat.XC_LoadPackage;
 
+import java.lang.ref.WeakReference;
 import java.util.Objects;
 
 import java.text.SimpleDateFormat;
@@ -81,6 +82,24 @@ import io.github.libxposed.api.XposedModuleInterface;
 public class ApplicationHook extends XposedModule {
 
     private static final String TAG = ApplicationHook.class.getSimpleName();
+
+    /** 好友个人主页所属的小程序 appId（抓包取证）。 */
+    private static final String PROFILE_APP_ID = "20002167";
+    /** 承载小程序页的容器 Activity 全类名。 */
+    private static final String PROFILE_CONTAINER_CLASS = "com.alipay.android.phone.xriver.bundlex.CSGAPushActivity";
+    /** 模块 App 点击好友行时写入的待打开标记，与 Kotlin 侧 PENDING_PROFILE_FILE 保持一致。 */
+    private static final String PENDING_PROFILE_FILE = "pending_profile.txt";
+    /** 待打开标记的有效期：超过这个时间视为用户早已放弃，冷启动后再跳转会很突兀。 */
+    private static final long PENDING_PROFILE_TTL = 20_000L;
+    /** 上次打开的好友主页，用于屏蔽模块 App 补发的重复广播。 */
+    private static String lastProfileUserId;
+    private static long lastProfileTime;
+    /** 上一次打开的好友页容器（CSGAPushActivity）；再打开新好友时先关掉它，返回才会回到主界面而不是上一个好友。 */
+    private static WeakReference<Activity> lastProfileActivity = new WeakReference<>(null);
+    /** 好友跳转发起时间：紧随其后创建的小程序容器页即视为好友页。 */
+    private static long profileOpenExpectAt;
+    /** 跳转发起后多久内创建的容器页仍算好友页，需覆盖冷启动耗时。 */
+    private static final long PROFILE_CONTAINER_EXPECT_WINDOW = 10_000L;
 
     @Getter
     private static final String modelVersion = BuildConfig.VERSION_NAME;
@@ -329,6 +348,84 @@ public class ApplicationHook extends XposedModule {
                 Log.i(TAG, "hook login successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook login err:", t);
+            }
+            // 好友主页走 alipays:// scheme，系统会先起一个空白中转页 SchemeLauncherActivity，
+            // 表现为界面闪一下。这里把它换成透明无标题主题并清掉窗口背景，跳转逻辑不受影响。
+            try {
+                XHelpers.findAndHookMethod("com.alipay.mobile.quinox.SchemeLauncherActivity", classLoader, "onCreate", android.os.Bundle.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.thisObject instanceof Activity) {
+                                ((Activity) param.thisObject).setTheme(android.R.style.Theme_Translucent_NoTitleBar);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (!(param.thisObject instanceof Activity)) {
+                                return;
+                            }
+                            android.view.Window window = ((Activity) param.thisObject).getWindow();
+                            if (window == null) {
+                                return;
+                            }
+                            window.setBackgroundDrawable(null);
+                            window.setDimAmount(0f);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
+                Log.i(TAG, "hook SchemeLauncherActivity successfully");
+            } catch (Throwable t) {
+                Log.err(TAG, "hook SchemeLauncherActivity err:", t);
+            }
+            // 连续打开不同好友时，小程序容器会在同一 task 里叠出多个实例，
+            // 返回就会退回上一个好友页。容器本身没有重写 onCreate，这里挂 Activity.onCreate 再按类名筛。
+            try {
+                XHelpers.findAndHookMethod("android.app.Activity", classLoader, "onCreate", android.os.Bundle.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (!(param.thisObject instanceof Activity)) {
+                                return;
+                            }
+                            Activity activity = (Activity) param.thisObject;
+                            if (!PROFILE_CONTAINER_CLASS.equals(activity.getClass().getName())) {
+                                return;
+                            }
+                            handleProfileContainer(activity);
+                        } catch (Throwable th) {
+                            Log.err(TAG, "handleProfileContainer err:", th);
+                        }
+                    }
+                });
+                Log.i(TAG, "hook CSGAPushActivity successfully");
+            } catch (Throwable t) {
+                Log.err(TAG, "hook CSGAPushActivity err:", t);
+            }
+            // 模块 App 点击好友时会把目标好友落盘并立刻拉起支付宝。
+            // 这里在支付宝任意页面 resume 时消费该标记，热启动/冷启动都能在第一帧就跳走，
+            // 不必再靠模块 App 延迟发广播（那 2.5s 的等待就是延迟的来源）。
+            try {
+                XHelpers.findAndHookMethod("android.app.Activity", classLoader, "onResume", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.thisObject instanceof Activity) {
+                                checkPendingProfile((Activity) param.thisObject);
+                            }
+                        } catch (Throwable th) {
+                            Log.err(TAG, "checkPendingProfile in onResume err:", th);
+                        }
+                    }
+                });
+                Log.i(TAG, "hook Activity.onResume successfully");
+            } catch (Throwable t) {
+                Log.err(TAG, "hook Activity.onResume err:", t);
             }
             try {
                 XHelpers.findAndHookMethod("android.app.Service", classLoader, "onCreate", new XC_MethodHook() {
@@ -1280,6 +1377,14 @@ public class ApplicationHook extends XposedModule {
                             Log.err(TAG, "sesame rpctest err:", th);
                         }
                         break;
+                    case "com.eg.android.AlipayGphone.sesame.openProfile":
+                        // 好友统计页面点某一行时触发：在宿主进程内打开该好友的支付宝主页
+                        try {
+                            openFriendProfile(context, intent.getStringExtra("userId"));
+                        } catch (Throwable th) {
+                            Log.err(TAG, "sesame openProfile err:", th);
+                        }
+                        break;
                     case "com.eg.android.AlipayGphone.sesame.reloadConfig":
                         // UI 侧修改日志开关等共享配置后通知本进程重载,使开关即时生效
                         try {
@@ -1372,6 +1477,7 @@ public class ApplicationHook extends XposedModule {
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.status");
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.rpctest");
             intentFilter.addAction("com.eg.android.AlipayGphone.sesame.reloadConfig");
+            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.openProfile");
 
             broadcastReceiver = new AlipayBroadcastReceiver();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1383,6 +1489,125 @@ public class ApplicationHook extends XposedModule {
             Log.i(TAG, "hook registerBroadcastReceiver successfully");
         } catch (Throwable th) {
             Log.err(TAG, "hook registerBroadcastReceiver err:", th);
+        }
+    }
+
+    /**
+     * 在宿主（支付宝）进程内打开指定好友的个人主页。
+     * <p>
+     * 必须由本进程发起：模块 App 直接 startActivity 一个 {@code alipays://} scheme 时，调用方不是
+     * 支付宝自身，会被 {@code BlackProductSafeGuardUtil.appSchemeCheck} 判为不可信而拦掉（实机验证
+     * 报 {@code proceed error}，界面停在首页）。在宿主进程内发起则等同于支付宝自己跳转。
+     *
+     * @param userId 好友的支付宝 userId（好友统计里的 id）
+     */
+    private static void openFriendProfile(Context context, String userId) {
+        if (StringUtil.isEmpty(userId)) {
+            Log.record("打开好友主页失败#缺少userId");
+            return;
+        }
+        // 模块 App 冷启动时会补发几次广播，这里对同一好友做去重，避免重复弹页
+        long now = System.currentTimeMillis();
+        if (userId.equals(lastProfileUserId) && now - lastProfileTime < 8000) {
+            return;
+        }
+        lastProfileUserId = userId;
+        lastProfileTime = now;
+        // 标记本次跳转：紧随其后创建的容器页就是好友页，需要接管并关掉上一个好友页
+        profileOpenExpectAt = now;
+        // 好友主页是 appId=20002167 的小程序页 profilePage，路由写法与通讯录里「聊天火花」跳转
+        // （startApp + appId + pageName + userId）一致，实机验证能打开并请求该好友的动态。
+        String uri = "alipays://platformapi/startApp"
+                + "?appId=" + PROFILE_APP_ID
+                + "&pageName=profilePage"
+                + "&userId=" + userId;
+        try {
+            Intent it = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri));
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(it);
+            Log.i(TAG, "open friend profile: " + userId);
+        } catch (Throwable th) {
+            profileOpenExpectAt = 0;
+            Log.err(TAG, "openFriendProfile err#userId=" + userId, th);
+            Log.record("打开好友主页失败#userId=" + userId);
+        }
+    }
+
+    /**
+     * 接管好友页容器：记下当前实例，并把上一次的好友页关掉。
+     * <p>
+     * 不关的话多个 {@code CSGAPushActivity} 会叠在同一 task 里，从第二个好友页返回会回到上一个好友。
+     */
+    private static void handleProfileContainer(Activity activity) {
+        if (!isFriendProfileContainer(activity)) {
+            return;
+        }
+        Activity last = lastProfileActivity.get();
+        if (last != null && last != activity && !last.isFinishing() && !last.isDestroyed()) {
+            last.finish();
+            Log.i(TAG, "finish previous profile page");
+        }
+        lastProfileActivity = new WeakReference<>(activity);
+    }
+
+    /**
+     * 判断容器页是否是好友主页：intent 里带好友主页小程序参数，或者是本次跳转后紧接着创建的容器。
+     */
+    private static boolean isFriendProfileContainer(Activity activity) {
+        boolean expect = profileOpenExpectAt > 0
+                && System.currentTimeMillis() - profileOpenExpectAt < PROFILE_CONTAINER_EXPECT_WINDOW;
+        if (expect) {
+            profileOpenExpectAt = 0;
+        }
+        boolean matched = false;
+        try {
+            Intent intent = activity.getIntent();
+            if (intent != null) {
+                String raw = intent.toString() + " " + intent.getDataString();
+                matched = raw.contains(PROFILE_APP_ID) || raw.contains("profilePage");
+            }
+        } catch (Throwable ignored) {
+        }
+        return matched || expect;
+    }
+
+    /**
+     * 消费模块 App 写在共享目录里的「待打开好友」标记。
+     * <p>
+     * 模块 App 点击好友行时先把 userId 落盘再拉起支付宝，宿主进程冷启动后一进
+     * {@code LauncherActivity.onResume} 就能直接跳主页，不必等广播，从而少一次「先停在首页」的闪烁。
+     * 标记只消费一次，且超过 {@link #PENDING_PROFILE_TTL} 视为过期。
+     */
+    private static void checkPendingProfile(Context context) {
+        try {
+            java.io.File file = new java.io.File(FileUtil.MAIN_DIRECTORY_FILE, PENDING_PROFILE_FILE);
+            if (!file.exists()) {
+                return;
+            }
+            String text = FileUtil.readFromFile(file);
+            // 先删再跳：即使下面跳转抛异常也不会反复触发
+            file.delete();
+            if (StringUtil.isEmpty(text)) {
+                return;
+            }
+            String[] parts = text.trim().split("\\s+");
+            String userId = parts[0];
+            long ts = 0;
+            if (parts.length > 1) {
+                try {
+                    ts = Long.parseLong(parts[1]);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            long age = System.currentTimeMillis() - ts;
+            if (ts > 0 && age > PENDING_PROFILE_TTL) {
+                Log.i(TAG, "pending profile expired: " + age + "ms");
+                return;
+            }
+            Log.i(TAG, "consume pending profile: " + userId);
+            openFriendProfile(context, userId);
+        } catch (Throwable th) {
+            Log.err(TAG, "checkPendingProfile err:", th);
         }
     }
 

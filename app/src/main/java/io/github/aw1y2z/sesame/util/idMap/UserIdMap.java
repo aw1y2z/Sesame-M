@@ -19,8 +19,20 @@ import java.util.concurrent.ConcurrentHashMap;
 public class UserIdMap {
     
     private static final Map<String, UserEntity> userMap = new ConcurrentHashMap<>();
-    
+
     private static final Map<String, UserEntity> readOnlyUserMap = Collections.unmodifiableMap(userMap);
+
+    /**
+     * 通讯录好友表是否已载入完成。
+     * <p>未载入时 userMap 是空的，任何 id 都查不到，此时不能拿它来判定「这个人是不是好友」，
+     * 否则会把真实好友也当成陌生人（例如好友统计）。
+     */
+    private static volatile boolean friendListLoaded = false;
+
+    /** @see #friendListLoaded */
+    public static boolean isFriendListLoaded() {
+        return friendListLoaded;
+    }
     
     /** 当前账号；volatile：切号在别的线程发生，读方必须能看到最新值 */
     @Getter
@@ -181,6 +193,7 @@ public class UserIdMap {
                     Log.record("未能获取自身账号信息，配置页副标题将回退为用户ID");
                 }
                 UserIdMap.save(selfId);
+                friendListLoaded = true;
             } catch (Throwable t) {
                 Log.i("checkUnknownId.run err:");
                 Log.printStackTrace(t);
@@ -337,10 +350,12 @@ public class UserIdMap {
         } catch (Exception e) {
             Log.printStackTrace(e);
         }
+        friendListLoaded = true;
     }
     
     public synchronized static void unload() {
         userMap.clear();
+        friendListLoaded = false;
     }
     
     public synchronized static boolean save(String userId) {

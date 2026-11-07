@@ -44,10 +44,17 @@ public class FriendWatch extends IdAndName {
 
     public static void friendWatch(String id, int collectedEnergy) {
         try {
+            String maskName = UserIdMap.getMaskName(id);
+            // 通讯录好友表已就绪时，查不到名字说明是种树 PK 等渠道来的陌生关系：
+            // 它们没有可展示的资料，不该出现在好友统计里。
+            // 表还没载入时不做这个甄别，否则会把真实好友一起漏掉。
+            if (maskName == null && UserIdMap.isFriendListLoaded()) {
+                return;
+            }
             JSONObject joSingle = joFriendWatch.optJSONObject(id);
             if (joSingle == null) {
                 joSingle = new JSONObject();
-                joSingle.put("name", UserIdMap.getMaskName(id));
+                joSingle.put("name", maskName);
                 joSingle.put("allGet", 0);
                 joSingle.put("startTime", TimeUtil.getDateStr());
                 joFriendWatch.put(id, joSingle);
@@ -56,6 +63,30 @@ public class FriendWatch extends IdAndName {
         } catch (Throwable th) {
             Log.err(TAG, "friendWatch err:", th);
         }
+    }
+
+    /**
+     * 剔除没有名字的记录：老版本不区分好友关系，把 PK 好友也记进了统计，表现为 name 缺失或空白。
+     * 真正的通讯录好友记录时一定带着 {@code UserEntity#getMaskName()}（形如「昵称|*实名」），不会是空串。
+     *
+     * @return 是否发生了删除
+     */
+    private static boolean pruneNonFriends(JSONObject jo) {
+        boolean changed = false;
+        List<String> toRemove = new ArrayList<>();
+        Iterator<String> ids = jo.keys();
+        while (ids.hasNext()) {
+            String id = ids.next();
+            JSONObject friend = jo.optJSONObject(id);
+            if (friend == null || friend.optString("name").trim().isEmpty()) {
+                toRemove.add(id);
+            }
+        }
+        for (String id : toRemove) {
+            jo.remove(id);
+            changed = true;
+        }
+        return changed;
     }
 
     public static synchronized void save() {
@@ -98,6 +129,10 @@ public class FriendWatch extends IdAndName {
                 joFriendWatch = new JSONObject(strFriendWatch);
             } else {
                 joFriendWatch = new JSONObject();
+            }
+            // 顺手清掉历史脏数据（PK 好友），否则它们会一直留在统计里
+            if (pruneNonFriends(joFriendWatch)) {
+                save();
             }
             return true;
         } catch (JSONException e) {
@@ -145,6 +180,10 @@ public class FriendWatch extends IdAndName {
                 joFriendWatch = new JSONObject();
             } else {
                 joFriendWatch = new JSONObject(strFriendWatch);
+            }
+            // 打开统计页时也清一次：这一步在模块 App 进程里跑，不依赖注入进程是否已启动
+            if (pruneNonFriends(joFriendWatch)) {
+                FileUtil.write2File(joFriendWatch.toString(), FileUtil.getFriendWatchFile());
             }
             Iterator<String> ids = joFriendWatch.keys();
             while (ids.hasNext()) {

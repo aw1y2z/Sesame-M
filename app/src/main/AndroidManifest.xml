@@ -10,6 +10,11 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
+    <!-- 好友统计里点好友要先把支付宝切到前台（否则宿主进程的页面跳转会被后台启动限制拦截） -->
+    <queries>
+        <package android:name="com.eg.android.AlipayGphone" />
+    </queries>
+
     <!--
       usesCleartextTraffic 保留为 true：配置页的「自定义AI | 测试响应」按钮在模块 App 进程里
       请求用户自填的接口地址，该地址可能是 http 的局域网/自建端点，禁明文会让测试直接失败。
