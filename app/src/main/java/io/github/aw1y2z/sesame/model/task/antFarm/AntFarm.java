@@ -111,6 +111,11 @@ public class AntFarm extends ModelTask {
      * 槽满后每 10 秒级的重试只是白打接口，每轮开头重置 (见 run())。
      */
     private boolean feedTroughFullThisRun = false;
+    /**
+     * 本轮领奖时服务端回了「饲料槽已满」（同 {@link #CODE_FEED_TROUGH_FULL}）：本轮不再领其余饲料任务。
+     * <p>槽满与任务无关，继续领只会逐个被拒、刷出一串相同的错误（每轮开头重置，见 {@link #run()}）。
+     */
+    private boolean awardTroughFullThisRun = false;
     private double finalScore = 0d;
     private int foodInTrough = 0;
 
@@ -269,6 +274,7 @@ public class AntFarm extends ModelTask {
         try {
             farmTaskAwardBusy = false;
             feedTroughFullThisRun = false;
+            awardTroughFullThisRun = false;
             if (enterFarm() == null) {
                 return;
             }
@@ -425,7 +431,10 @@ public class AntFarm extends ModelTask {
 
             if (receiveFarmTaskAward.getValue()) {
                 listFarmTask(TaskStatus.TODO);
-                listFarmTask(TaskStatus.FINISHED);
+                // 第一趟已确认槽满时第二趟不必再拉列表：领奖必被拒，只是白打接口
+                if (!awardTroughFullThisRun) {
+                    listFarmTask(TaskStatus.FINISHED);
+                }
             }
 
             if (AnimalInteractStatus.HOME.name().equals(ownerAnimal.animalInteractStatus)) {
@@ -1744,12 +1753,17 @@ public class AntFarm extends ModelTask {
                 if (farmTaskAwardBusy) {
                     break;
                 }
+                // 槽已满：后续任务同样领不下，逐个请求只会被拒（提示已在置位时打过，这里不再重复）
+                if (awardTroughFullThisRun) {
+                    break;
+                }
                 jo = ja.getJSONObject(i);
                 TaskStatus taskStatus = TaskStatus.valueOf(jo.getString("taskStatus"));
                 String title = jo.getString("title");
-                //黑名单任务跳过
+                //黑名单只限制「自动去做」，不限制「手动完成后领奖」；
+                //但必须遵守本次 Mode：调用方 TODO/FINISHED 各跑一趟，不判 Mode 会重复领同一个任务
                 if (AntFarmDoFarmTaskList.getValue().contains(title)) {
-                    if (taskStatus == TaskStatus.FINISHED) {
+                    if (taskStatus == TaskStatus.FINISHED && Mode == TaskStatus.FINISHED) {
                         receiveFarmTaskAward(jo);
                     }
                     continue;
@@ -2034,6 +2048,11 @@ public class AntFarm extends ModelTask {
                 if (MessageUtil.isServerBusy(jo) && !farmTaskAwardBusy) {
                     farmTaskAwardBusy = true;
                     Log.record("服务端繁忙🌧️本轮跳过剩余饲料任务领取");
+                }
+                // 槽已满(331)：与具体任务无关，继续领只会逐个被拒
+                if (CODE_FEED_TROUGH_FULL.equals(jo.optString("resultCode")) && !awardTroughFullThisRun) {
+                    awardTroughFullThisRun = true;
+                    Log.record("饲料槽已满，本轮跳过剩余饲料任务领取");
                 }
                 return false;
             }
