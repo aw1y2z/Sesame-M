@@ -85,7 +85,15 @@ public final class ReadForestTask {
             JSONObject finishedBooks = loadFinishedBooks(context, userScope());
             Set<String> triedBooks = new HashSet<>();
             while (true) {
-                JSONObject freeBook = selectFreeBook(finishedBooks, ReadForestRpcCall.getIndex(token, VERSION), triedBooks);
+                String indexResponse;
+                try {
+                    indexResponse = ReadForestRpcCall.getIndex(token, VERSION);
+                } catch (java.net.SocketTimeoutException e) {
+                    Log.record(TAG + "书城请求超时，本轮阅读结束");
+                    logSummary("书城请求超时");
+                    return;
+                }
+                JSONObject freeBook = selectFreeBook(finishedBooks, indexResponse, triedBooks);
                 if (freeBook == null) {
                     logSummary("首页暂无更多未读免费书籍");
                     return;
@@ -111,8 +119,13 @@ public final class ReadForestTask {
                 }
             }
         } catch (Throwable t) {
-            Log.i(TAG, "execute err:");
-            Log.printStackTrace(TAG, t);
+            // 外网抖动很常见，超时/OOM 之外的异常才需要堆栈：
+            // 读超时只记一行，避免每次网络抖动都在运行日志刷 30 行堆栈
+            if (isNetworkIssue(t)) {
+                Log.record(TAG + "网络超时，本轮阅读中断");
+            } else {
+                Log.err(TAG, "execute err:", t);
+            }
             // 异常中断也向 forest 输出本轮累计能量汇总,避免异常轮次 forest 日志无记录
             logSummary("执行异常中断");
         }
@@ -152,7 +165,14 @@ public final class ReadForestTask {
 
     /* 逐章阅读一本书: 返回TRUE=今日能量已满, FALSE=此书无法再获得能量(或无法继续), null=全书读完自动换下一本 */
     private static Boolean autoReadBook(String bookId, String bookName, String token, Context context, JSONObject finishedBooks) throws Exception {
-        JSONObject chapterData = parseData(ReadForestRpcCall.getChapter(bookId, null, token, VERSION));
+        JSONObject chapterData;
+        try {
+            chapterData = parseData(ReadForestRpcCall.getChapter(bookId, null, token, VERSION));
+        } catch (java.net.SocketTimeoutException e) {
+            // 取章节超时只影响这一本，交给上层换书，不必中断整轮
+            Log.record(TAG + "[" + bookName + "]取章节超时，换下一本");
+            return null;
+        }
         if (chapterData == null) {
             return Boolean.FALSE;
         }
@@ -177,8 +197,16 @@ public final class ReadForestTask {
                 }
                 lastEnergy = firstProgress.current;
             }
-            ReadForestRpcCall.updateReadingTime(bookId, chapterId, RANDOM.nextInt(668) + 333, token, VERSION);
-            ReadForestRpcCall.setReadRecently(bookId, chapterId, chapterName, token, VERSION);
+            // 上报类接口偶发超时不必中断整本书：吞掉异常继续读，能量由下次进度查询自然补记
+            try {
+                ReadForestRpcCall.updateReadingTime(bookId, chapterId, RANDOM.nextInt(668) + 333, token, VERSION);
+            } catch (java.net.SocketTimeoutException ignored) {
+                Log.record(TAG + "[" + bookName + "]阅读时长上报超时，继续下一章");
+            }
+            try {
+                ReadForestRpcCall.setReadRecently(bookId, chapterId, chapterName, token, VERSION);
+            } catch (java.net.SocketTimeoutException ignored) {
+            }
             TimeUtil.sleep(1000);
             EnergyProgress progress = readEnergyProgress(token, bookId, chapterId);
             if (progress.hasData) {
@@ -214,7 +242,12 @@ public final class ReadForestTask {
                 return null;
             }
             TimeUtil.sleep(RANDOM.nextInt(2002) + 1000);
-            chapterData = parseData(ReadForestRpcCall.getChapter(bookId, nextId, token, VERSION));
+            try {
+                chapterData = parseData(ReadForestRpcCall.getChapter(bookId, nextId, token, VERSION));
+            } catch (java.net.SocketTimeoutException e) {
+                Log.record(TAG + "[" + bookName + "]翻页超时，换下一本");
+                return null;
+            }
             if (chapterData == null) {
                 return Boolean.FALSE;
             }
@@ -223,6 +256,25 @@ public final class ReadForestTask {
             }
         }
         return Boolean.FALSE;
+    }
+
+    /**
+     * 是否为外网抖动类异常（超时/连接中断）。
+     * <p>这类异常由网络决定、不代表代码缺陷，堆栈对定位无帮助，故不写异常日志。
+     */
+    private static boolean isNetworkIssue(Throwable t) {
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            if (cur instanceof java.net.SocketTimeoutException
+                    || cur instanceof java.net.ConnectException
+                    || cur instanceof java.net.UnknownHostException
+                    || cur instanceof java.io.InterruptedIOException) {
+                return true;
+            }
+            if (cur.getCause() == cur) {
+                break;
+            }
+        }
+        return false;
     }
 
     private static EnergyProgress readEnergyProgress(String token, String bookId, String chapterId) throws Exception {
