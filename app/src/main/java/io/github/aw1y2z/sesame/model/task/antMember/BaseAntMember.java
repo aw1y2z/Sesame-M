@@ -220,8 +220,15 @@ public abstract class BaseAntMember extends ModelTask {
                     }
                 }
                 if ("BROWSE".equals(type)) {
-                    doubleCheck = doBrowseTask(taskList, adOnly, blacklist);
+                    doubleCheck = doBrowseTask(taskList, adOnly, blacklist) || doubleCheck;
                 } else {
+                    // 组类型不是 BROWSE，组内仍可能混着浏览类任务：如「做任务赚积分」的 TASK_CONV 组 type=OTHERS，
+                    // 里面的「逛一逛淘宝斗地主/消消乐」targetBusiness 是 BROWSE#UNLIMITED#xxx，按组过滤会整组丢掉。
+                    // 这里按任务自身的 targetBusiness 挑出浏览类交给 doBrowseTask，其余保持原样给扩展处理。
+                    JSONArray browseOnly = pickBrowseTask(taskList);
+                    if (browseOnly.length() > 0) {
+                        doubleCheck = doBrowseTask(browseOnly, adOnly, blacklist) || doubleCheck;
+                    }
                     // 广告路径只处理 BROWSE 下的广告任务，非 BROWSE 分类的任务不是广告任务，跳过
                     if (!adOnly) {
                         ExtensionsHandle.handleAlphaRequest("antMember", "doMoreTask", category);
@@ -233,6 +240,32 @@ public abstract class BaseAntMember extends ModelTask {
             Log.err(TAG, "processSignPageTaskList err:", t);
         }
         return doubleCheck;
+    }
+
+    /** 从任意分类里挑出 targetBusiness 首段为 BROWSE 的任务（分类的 type 不可靠时用） */
+    private static JSONArray pickBrowseTask(JSONArray taskList) {
+        JSONArray picked = new JSONArray();
+        for (int i = 0; i < taskList.length(); i++) {
+            JSONObject task = taskList.optJSONObject(i);
+            if (task == null) {
+                continue;
+            }
+            JSONObject cfg = task.optJSONObject("taskConfigInfo");
+            if (cfg == null) {
+                cfg = task.optJSONObject("simpleTaskConfig");
+            }
+            JSONArray targetBusinessArr = cfg == null ? null : cfg.optJSONArray("targetBusiness");
+            if (targetBusinessArr == null || targetBusinessArr.length() == 0) {
+                targetBusinessArr = task.optJSONArray("targetBusiness");
+            }
+            if (targetBusinessArr == null || targetBusinessArr.length() == 0) {
+                continue;
+            }
+            if (targetBusinessArr.optString(0, "").startsWith("BROWSE#")) {
+                picked.put(task);
+            }
+        }
+        return picked;
     }
 
     /** 解析 queryAllStatusTaskList 结果，按职责处理 */
