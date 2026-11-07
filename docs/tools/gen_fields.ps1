@@ -170,7 +170,11 @@ foreach ($cls in $order) {
         if ($code -eq '' -or $label -eq '') { continue }
 
         $def = $zero
-        if ($typeName -match 'Integer') {
+        # 只读文本字段（如「模块不提供响应测试」提示）：第 3 参是提示正文，不是默认值
+        if ($typeName -match 'ReadOnlyText') {
+            $def = '只读提示'
+        }
+        elseif ($typeName -match 'Integer') {
             if ($args.Count -ge 5) { $def = "默认 " + (Eval-Num (Unquote $args[2])) + "，范围 " + (Eval-Num (Unquote $args[3])) + "~" + (Eval-Num (Unquote $args[4])) }
             elseif ($args.Count -ge 3) { $def = "默认 " + (Eval-Num (Unquote $args[2])) }
         }
