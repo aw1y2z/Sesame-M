@@ -137,6 +137,41 @@ public class AntForestV2 extends ModelTask {
     private static final long VITALITY_PROBE_INTERVAL_MS = 3000L;
     private static final int VITALITY_PROBE_ROUNDS = 3;
 
+    /**
+     * 能量雨各来源的结算克数。
+     *
+     * <p>五个来源互不占额度：每日免费 {@value #ENERGY_RAIN_NORMAL}g、次卡/送出/受赠各
+     * {@value #ENERGY_RAIN_CARD_OR_GRANT}g、救援队游戏局 {@value #ENERGY_RAIN_BY_GAME}g。
+     * {@code canPlayToday} 五者共用，只表示「还能再开一局」，表示不了「是谁的额度」。
+     * 70g 的三种来源克数相同、无法也不必区分，唯有游戏局恒为 50g，是救援队已完成的凭据。
+     *
+     * <p>受赠局由好友随时送来，故不能假设一轮开完就没了：每轮都须复查 {@code canPlayToday}。
+     */
+    private static final int ENERGY_RAIN_NORMAL = 120;
+    private static final int ENERGY_RAIN_CARD_OR_GRANT = 70;
+    private static final int ENERGY_RAIN_BY_GAME = 50;
+
+    /** 救援队上报后等待游戏局额度下发：服务端异步推进，轮询几轮 */
+    private static final long ENERGY_RAIN_GRANT_INTERVAL_MS = 3000L;
+    private static final int ENERGY_RAIN_GRANT_ROUNDS = 3;
+
+    /** 一轮最多开几局：五来源各一次，余一局防受赠叠加 */
+    private static final int ENERGY_RAIN_MAX_ROUNDS_PER_RUN = 6;
+
+    /**
+     * 救援队当日标记：上报（含 4 次外网直连）只做一次。
+     * <p>与 {@code EnergyRain::PlayGame}（已拿到满额一局）语义不同。上报成功即置位：
+     * 状态推进是异步的，没确认也必须置位，否则每轮重发外网请求。
+     */
+    private static final String SLJYD_FLAG = "forest::sljydReported";
+
+    /** 任务项已从列表移除：表示已完成，勿当失败重试 */
+    private static final String SLJYD_MISSING = "MISSING";
+
+    /** 救援队上报后的状态回读轮询：只作旁证，命中非待办即返回 */
+    private static final long SLJYD_PROBE_INTERVAL_MS = 2000L;
+    private static final int SLJYD_PROBE_ROUNDS = 2;
+
     private static final AverageMath offsetTimeMath = new AverageMath(5);
 
     private static final Map<String, Long> usingProps = new ConcurrentHashMap<>();
@@ -2870,6 +2905,7 @@ public class AntForestV2 extends ModelTask {
         }
         if (isEnergyRainVitalityTask(taskType, taskTitle)) {
             return () -> {
+                // 活力值任务里的能量雨就是普通一局，按次卡/赠送额度走
                 startEnergyRain();
                 return probeVitalityDone(sceneCode, taskType);
             };
@@ -3179,12 +3215,19 @@ public class AntForestV2 extends ModelTask {
         return changed;
     }
 
-    private void startEnergyRain() {
+    /**
+     * 开一局能量雨并结算。
+     *
+     * <p>只有 50g 的游戏局能证明救援队已换到额度；任务列表回读不可作判据（上报异步，回读必然抢跑）。
+     *
+     * @return 结算成功的克数；失败返回 {@code -1}
+     */
+    private int startEnergyRain() {
         try {
             JSONObject jo = new JSONObject(AntForestRpcCall.startEnergyRain());
             TimeUtil.sleep(500);
             if (!MessageUtil.checkResultCode(TAG, jo)) {
-                return;
+                return -1;
             }
             String token = jo.getString("token");
             JSONArray bubbleEnergyList = jo.getJSONObject("difficultyInfo").getJSONArray("bubbleEnergyList");
@@ -3193,20 +3236,38 @@ public class AntForestV2 extends ModelTask {
                 sum += bubbleEnergyList.getInt(i);
             }
             TimeUtil.sleep(5000L);
-            if (sum == 50) {
+            jo = new JSONObject(AntForestRpcCall.energyRainSettlement(sum, token));
+            if (!MessageUtil.checkResultCode(TAG, jo)) {
+                return -1;
+            }
+            Toast.show("获得了[" + sum + "g]能量[能量雨]");
+            Log.forest("收能量雨🌧️" + energyRainLabel(sum) + "[" + sum + "g]");
+            totalCollected += sum;
+            Statistics.addData(Statistics.DataType.COLLECTED, sum);
+            TimeUtil.sleep(500);
+            // 游戏局即救援队已换到额度，此标记只能由此处置位
+            if (sum == ENERGY_RAIN_BY_GAME) {
                 Status.flagToday("EnergyRain::PlayGame");
             }
-            jo = new JSONObject(AntForestRpcCall.energyRainSettlement(sum, token));
-            if (MessageUtil.checkResultCode(TAG, jo)) {
-                Toast.show("获得了[" + sum + "g]能量[能量雨]");
-                Log.forest("收能量雨🌧️[" + sum + "g]");
-                totalCollected += sum;
-                Statistics.addData(Statistics.DataType.COLLECTED, sum);
-            }
-            TimeUtil.sleep(500);
+            return sum;
         } catch (Throwable th) {
             Log.err(TAG, "startEnergyRain err:", th);
         }
+        return -1;
+    }
+
+    /** 按克数标注能量雨局（仅日志用）；70g 三来源同值，合并标注不臆造 */
+    private static String energyRainLabel(int sum) {
+        if (sum == ENERGY_RAIN_NORMAL) {
+            return "(每日免费局)";
+        }
+        if (sum == ENERGY_RAIN_CARD_OR_GRANT) {
+            return "(70g局)";
+        }
+        if (sum == ENERGY_RAIN_BY_GAME) {
+            return "(救援队游戏局)";
+        }
+        return "";
     }
 
     // LIMIT_TIME_ENERGY_DOUBLE_CLICK,CR20230516000363
@@ -3235,81 +3296,109 @@ public class AntForestV2 extends ModelTask {
         }
     }
 
+    /**
+     * 收集能量雨：先开尽当前额度，再送好友，最后上报救援队等游戏局额度。
+     *
+     * <p>受赠局由好友随时送来，故每轮都要先复查现有额度，不能因「今日已开满」而整体跳过。
+     */
     private void energyRain() {
         try {
+            // 1. 开掉当前额度（含受赠局、跨轮才生效的送出局）
+            drainEnergyRainQuota();
+
+            // 2. 赠送：送出后自己会得一次，额度同样走 canPlayToday
             JSONObject joEnergyRainHome = new JSONObject(AntForestRpcCall.queryEnergyRainHome());
             TimeUtil.sleep(500);
-            if (MessageUtil.checkResultCode(TAG, joEnergyRainHome)) {
-                if (joEnergyRainHome.getBoolean("canPlayToday")) {
-                    startEnergyRain();
-                }
-                if (joEnergyRainHome.getBoolean("canGrantStatus")) {
-                    Log.record("有送能量雨的机会");
-                    JSONObject joEnergyRainCanGrantList = new JSONObject(AntForestRpcCall.queryEnergyRainCanGrantList());
+            if (MessageUtil.checkResultCode(TAG, joEnergyRainHome)
+                    && joEnergyRainHome.getBoolean("canGrantStatus")) {
+                Log.record("有送能量雨的机会");
+                JSONObject joGrantList = new JSONObject(AntForestRpcCall.queryEnergyRainCanGrantList());
+                TimeUtil.sleep(500);
+                JSONArray grantInfos = joGrantList.optJSONArray("grantInfos");
+                Set<String> set = giveEnergyRainList.getValue();
+                boolean granted = false;
+                for (int j = 0; grantInfos != null && j < grantInfos.length(); j++) {
+                    JSONObject grantInfo = grantInfos.optJSONObject(j);
+                    if (grantInfo == null || !grantInfo.optBoolean("canGrantedStatus", false)) {
+                        continue;
+                    }
+                    String userId = grantInfo.optString("userId", "");
+                    if (userId.isEmpty() || !set.contains(userId)) {
+                        continue;
+                    }
+                    JSONObject joChance = new JSONObject(AntForestRpcCall.grantEnergyRainChance(userId));
                     TimeUtil.sleep(500);
-                    JSONArray grantInfos = joEnergyRainCanGrantList.optJSONArray("grantInfos");
-                    if (grantInfos == null) {
-                        return;
+                    granted = true;
+                    // 列表里没有可赠送的好友时不赠送
+                    if (MessageUtil.checkResultCode(TAG, joChance)) {
+                        Log.forest("送能量雨🌧️[" + UserIdMap.getMaskName(userId) + "]");
+                        // 送出换来的额度可能延迟生效，能开就开
+                        drainEnergyRainQuota();
                     }
-                    Set<String> set = giveEnergyRainList.getValue();
-                    String userId;
-                    boolean granted = false;
-                    for (int j = 0; j < grantInfos.length(); j++) {
-                        JSONObject grantInfo = grantInfos.optJSONObject(j);
-                        if (grantInfo == null) {
-                            continue;
-                        }
-                        if (grantInfo.optBoolean("canGrantedStatus", false)) {
-                            userId = grantInfo.optString("userId", "");
-                            if (userId.isEmpty()) {
-                                continue;
-                            }
-                            if (set.contains(userId)) {
-                                JSONObject joEnergyRainChance = new JSONObject(AntForestRpcCall.grantEnergyRainChance(userId));
-                                TimeUtil.sleep(500);
-                                Log.record("尝试送能量雨给【" + UserIdMap.getMaskName(userId) + "】");
-                                granted = true;
-                                // 20230724能量雨调整为列表中没有可赠送的好友则不赠送
-                                if (MessageUtil.checkResultCode(TAG, joEnergyRainChance)) {
-                                    Log.forest("送能量雨🌧️[" + UserIdMap.getMaskName(userId) + "]");
-                                    startEnergyRain();
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    if (!granted) {
-                        Log.record("没有可以送的用户");
-                    }
+                    break;
                 }
-                boolean canPlayGame = joEnergyRainHome.getBoolean("canPlayGame");
+                if (!granted) {
+                    Log.record("没有可以送的用户");
+                }
+            }
 
-                if (canPlayGame) {
-                    // 检查今日是否需要执行
-                    if (!Status.hasFlagToday("EnergyRain::PlayGame")) {
-                        Log.record("是否可以能量雨游戏: " + canPlayGame);
-                        // 检查并处理游戏任务
-                        checkAndDoEndGameTask();
-                        TimeUtil.sleep(4000);
-                    }
+            // 3. 游戏局：今天已换到过就收工
+            if (Status.hasFlagToday("EnergyRain::PlayGame")) {
+                return;
+            }
+            // SLJYD_FLAG 只挡重复上报，不挡「把已下发的额度开掉」
+            if (!Status.hasFlagToday(SLJYD_FLAG)) {
+                checkAndDoEndGameTask();
+                TimeUtil.sleep(4000);
+            }
+            // 额度异步下发，轮询等它出现；没等到也不打标记，下一轮再来
+            for (int round = 0; round < ENERGY_RAIN_GRANT_ROUNDS; round++) {
+                JSONObject jo = new JSONObject(AntForestRpcCall.queryEnergyRainHome());
+                if (MessageUtil.checkResultCode(TAG, jo) && jo.getBoolean("canPlayToday")) {
+                    drainEnergyRainQuota();
+                    return;
                 }
+                TimeUtil.sleep(ENERGY_RAIN_GRANT_INTERVAL_MS);
             }
-            joEnergyRainHome = new JSONObject(AntForestRpcCall.queryEnergyRainHome());
-            TimeUtil.sleep(500);
-            if (MessageUtil.checkResultCode(TAG, joEnergyRainHome) && joEnergyRainHome.getBoolean("canPlayToday")) {
-                startEnergyRain();
-            }
+            Log.record("能量雨🌧️游戏局额度未下发#下次运行重试");
         } catch (Throwable th) {
             Log.err(TAG, "energyRain err:", th);
         }
     }
 
-    /** 回读森林救援队（{@code GAME_DONE_SLJYD}）的任务状态；取不到返回 {@code null} */
+    /** 开尽当前能量雨额度：{@code canPlayToday} 为真就开一局，直到服务端说没有 */
+    private void drainEnergyRainQuota() {
+        try {
+            for (int round = 0; round < ENERGY_RAIN_MAX_ROUNDS_PER_RUN; round++) {
+                JSONObject jo = new JSONObject(AntForestRpcCall.queryEnergyRainHome());
+                if (!MessageUtil.checkResultCode(TAG, jo) || !jo.getBoolean("canPlayToday")) {
+                    return;
+                }
+                if (startEnergyRain() < 0) {
+                    // 开局/结算失败：额度没消耗掉，再问也是同样结果，直接交给下一轮
+                    return;
+                }
+            }
+        } catch (Throwable th) {
+            Log.err(TAG, "drainEnergyRainQuota err:", th);
+        }
+    }
+
+    /**
+     * 回读森林救援队（{@code GAME_DONE_SLJYD}）的任务状态。
+     *
+     * <p>返回 {@link #SLJYD_MISSING} 表示响应已无此项（完成后服务端会移除，是「已完成」的证据，勿当失败重试）；
+     * {@code null} 表示响应残缺，无从判断。
+     */
     private static String queryEnergyRainSljydStatus() {
         try {
             JSONObject jo = new JSONObject(AntForestRpcCall.queryEnergyRainEndGameList());
             if (!MessageUtil.checkResultCode(TAG, jo)) {
                 return null;
+            }
+            if (!jo.has("energyRainEndGameGroupTask")) {
+                // 连任务组都没有：要么今天没有这项，要么就是已经做完被整组摘掉
+                return SLJYD_MISSING;
             }
             JSONObject groupTask = jo.optJSONObject("energyRainEndGameGroupTask");
             JSONArray taskInfoList = groupTask != null ? groupTask.optJSONArray("taskInfoList") : null;
@@ -3332,6 +3421,15 @@ public class AntForestV2 extends ModelTask {
         return null;
     }
 
+    /**
+     * 救援队是否已达成：任务项被移除、或状态不在待办/未触发，都算已完成。
+     * <p>{@code null}（响应残缺）不作已完成，留待下次判断。
+     */
+    private static boolean isSljydDone(String status) {
+        return SLJYD_MISSING.equals(status)
+                || (status != null && !"TODO".equals(status) && !"NOT_TRIGGER".equals(status));
+    }
+
     public static void checkAndDoEndGameTask() {
         try {
             // 1. 查询游戏任务列表
@@ -3340,15 +3438,16 @@ public class AntForestV2 extends ModelTask {
             if (!MessageUtil.checkResultCode(TAG, jo)) {
                 return;
             }
-            if (!jo.has("energyRainEndGameGroupTask")) {
-                // 响应里没有任务组：可能今天确实没有，也可能是响应缺项。
-                // 不打当日标记，留给下一轮重试（多一次查询的成本远低于整天漏掉任务）。
-                Log.record("森林救援队🐱未取到任务组#下次运行重试");
+            boolean needInit = jo.optBoolean("needInitTask", false);
+            if (!jo.has("energyRainEndGameGroupTask") && !needInit) {
+                // 无任务组且未要求接入 = 已做完或今天没下发，置位以免每轮重复查
+                Status.flagToday(SLJYD_FLAG);
+                Log.record("森林救援队🐱无未完结任务组#今日跳过");
                 return;
             }
 
             // 2. 初始化新任务（需要接入森林救援队）
-            if (jo.optBoolean("needInitTask", false)) {
+            if (needInit) {
                 Log.record("检测到新任务，准备接入[森林救援队]...");
                 String initResStr = AntForestRpcCall.initTask("GAME_DONE_SLJYD");
                 JSONObject initRes = new JSONObject(initResStr);
@@ -3357,37 +3456,57 @@ public class AntForestV2 extends ModelTask {
                 }
             }
 
-            // 3. 仅当森林救援队(GAME_DONE_SLJYD)未完结时才上报，避免每轮重复发起外部请求
+            // 3. 状态未完结才上报，避免每轮重复发起外部请求
             String sljydStatus = queryEnergyRainSljydStatus();
+            // 刚 initTask 的一轮，「列表里没有」只说明服务端还没落库，不能当已完成
+            if (!needInit && SLJYD_MISSING.equals(sljydStatus)) {
+                Status.flagToday(SLJYD_FLAG);
+                Log.record("森林救援队🐱已完结#任务项已从列表移除");
+                return;
+            }
 
-            // 需要初始化、或任务处于待办/未触发时上报；已完结则仅标记今日已处理
-            boolean needInit = jo.optBoolean("needInitTask", false);
             boolean shouldReport = needInit
                     || "TODO".equals(sljydStatus)
                     || "NOT_TRIGGER".equals(sljydStatus);
 
             if (shouldReport) {
-                GameTask.Forest_sljyd.report("森林", 1);
-                // 上报是异步的：等一会儿回读，确认任务已脱离待办才打当日标记。
-                // 发完即标记会导致服务端未接受时当天不再重试，任务整天领不到。
-                TimeUtil.sleep(3000);
-                String after = queryEnergyRainSljydStatus();
-                if (after != null && !"TODO".equals(after) && !"NOT_TRIGGER".equals(after)) {
-                    Status.flagToday("EnergyRain::PlayGame");
-                    Log.record("森林救援队🐱上报后确认完成(状态:" + after + ")");
+                // 每发一次就回读一次状态：达成所需次数协议未给出，以真实推进为准、不按固定次数硬发。
+                // 必须同步——异步版会让回读抢在请求之前，读到旧状态。
+                final String[] after = {sljydStatus};
+                int successes = GameTask.Forest_sljyd.reportSync("森林救援队", 1, null, () -> {
+                    TimeUtil.sleep(SLJYD_PROBE_INTERVAL_MS);
+                    after[0] = queryEnergyRainSljydStatus();
+                    return isSljydDone(after[0]);
+                });
+                if (successes <= 0) {
+                    // 一次都没发出去，不打标记，下一轮可再试
+                    Log.record("森林救援队🐱上报失败#下次运行重试");
+                    return;
+                }
+                // 上报发出即置位：状态推进是异步的，没确认也不能每轮重发外网请求
+                Status.flagToday(SLJYD_FLAG);
+                if (isSljydDone(after[0])) {
+                    Log.record("森林救援队🐱已完成[" + successes + "次上报](状态:" + after[0] + ")");
                 } else {
-                    Log.record("森林救援队🐱上报后未确认(状态:" + after + ")#下次运行重试");
+                    // 未推进时继续轮询几轮作旁证，不额外发请求
+                    for (int round = 0; round < SLJYD_PROBE_ROUNDS; round++) {
+                        TimeUtil.sleep(SLJYD_PROBE_INTERVAL_MS);
+                        after[0] = queryEnergyRainSljydStatus();
+                        if (isSljydDone(after[0])) {
+                            break;
+                        }
+                    }
+                    Log.i(TAG, "森林救援队🐱上报已发出[" + successes + "次]，状态暂未推进(" + after[0] + ")");
                 }
                 return;
             }
             if (sljydStatus == null) {
-                // 列表里没取到这项：可能是响应不含该项，不能凭猜就打整日标记
+                // 响应残缺，判断不了状态
                 Log.record("森林救援队🐱未取到任务状态#下次运行重试");
                 return;
             }
             Log.record("森林救援队🐱无需上报(状态:" + sljydStatus + ")，今日跳过");
-            Status.flagToday("EnergyRain::PlayGame");
-
+            Status.flagToday(SLJYD_FLAG);
         } catch (Throwable th) {
             Log.printStackTrace("执行能量雨后续任务出错:", th);
         }

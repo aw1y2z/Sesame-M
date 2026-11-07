@@ -14,6 +14,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Random;
+import java.util.function.BooleanSupplier;
 
 /**
  * 游戏任务上报工具类
@@ -34,6 +35,13 @@ public enum GameTask {
     private final String version;
     private final int requestsPerEgg; // 完成1个🥚要多少次 为了防止网络崩溃 多加1次
     private String cachedToken; // 缓存登录Token
+
+    /**
+     * 外网游戏服的连接/读取超时。
+     * <p>{@code reportSync} 在任务线程同步执行，超时过长会把整轮任务卡死；读超时留得比连接长以容忍弱网首包。
+     */
+    private static final int CONNECT_TIMEOUT_MS = 5_000;
+    private static final int READ_TIMEOUT_MS = 8_000;
 
     /**
      * 根据小程序 appId 匹配游戏任务（金豆乐园游戏权益上报使用）
@@ -102,8 +110,8 @@ public enum GameTask {
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             // 防止外部游戏服连接挂起导致当前线程无限阻塞（主任务线程会因此冻结，只能重启恢复）
-            conn.setConnectTimeout(10_000);
-            conn.setReadTimeout(15_000);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("alipayMiniMark", mark);
@@ -211,10 +219,25 @@ public enum GameTask {
      * @param channelOverride 非空时覆盖 action_finish_channel；为空用枚举默认渠道
      */
     public int reportSync(String gameType, int eggCount, String channelOverride) {
+        return reportSync(gameType, eggCount, channelOverride, null);
+    }
+
+    /**
+     * 同步执行上报任务，每成功一次就询问 {@code reached} 是否已达目标。
+     *
+     * <p>服务端达成所需次数由接口内部决定、协议未给出，故不能把固定次数当准绳：
+     * 以真实状态推进为准，{@link #requestsPerEgg} 仅作上限兜底。已达目标即停发，
+     * 可免掉多余的外网直连（这类请求绕过支付宝网关，是风控最敏感的部分）。
+     *
+     * @param channelOverride 非空时覆盖 action_finish_channel；为空用枚举默认渠道
+     * @param reached         每次上报成功后回调，返回 {@code true} 表示目标已达成、不再续发；为 null 则发满次
+     * @return 成功上报的次数
+     */
+    public int reportSync(String gameType, int eggCount, String channelOverride, BooleanSupplier reached) {
         if (eggCount <= 0) {
             return 0;
         }
-        int requiredSuccesses = eggCount * this.requestsPerEgg;
+        int maxReports = eggCount * this.requestsPerEgg;
         this.cachedToken = login();
         if (this.cachedToken == null || this.cachedToken.isEmpty()) {
             Log.error("无法获取⚠️有效的Token，放弃上报任务");
@@ -222,12 +245,16 @@ public enum GameTask {
         }
 
         int successfulReports = 0;
-        for (int i = 1; i <= requiredSuccesses; i++) {
-            if (!executeSingleReport(gameType, i, requiredSuccesses, channelOverride)) {
+        for (int i = 1; i <= maxReports; i++) {
+            if (!executeSingleReport(gameType, i, maxReports, channelOverride)) {
                 break;
             }
             successfulReports++;
-            if (i < requiredSuccesses) {
+            // 已达成就不必再发：真实状态比固定的 requestsPerEgg 可靠
+            if (reached != null && reached.getAsBoolean()) {
+                break;
+            }
+            if (i < maxReports) {
                 try {
                     Thread.sleep(new Random().nextInt(2001) + 1000);
                 } catch (InterruptedException e) {
@@ -271,8 +298,8 @@ public enum GameTask {
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             // 防止外部游戏服连接挂起导致当前线程无限阻塞（reportSync 在主任务线程同步执行）
-            conn.setConnectTimeout(10_000);
-            conn.setReadTimeout(15_000);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
             conn.setDoOutput(true);
             conn.setRequestProperty("authorization", this.cachedToken);
             conn.setRequestProperty("alipayMiniMark", mark);
