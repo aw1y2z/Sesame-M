@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 
 @SuppressLint("SimpleDateFormat")
@@ -277,8 +278,19 @@ public class JsonUtil {
      * 两侧独有的键不算差异。用于「格式化回写」前的把关——只允许改格式，不许改数据。
      */
     public static boolean isRewriteLossless(String sourceJson, String rewrittenJson) {
+        return isRewriteLossless(sourceJson, rewrittenJson, null);
+    }
+
+    /**
+     * 同上，但按 {@code knownPaths} 放行"消失的键"：
+     * 只有调用方声明为已知的路径（如 {@code modelFieldsMap.AnswerAI.enable}）消失才判失败，
+     * 其余键视为代码里已删除的废弃键，允许被回写清掉。
+     *
+     * @param knownPaths 已知键路径集合；传 {@code null} 表示任何键都不许消失（严格模式）
+     */
+    public static boolean isRewriteLossless(String sourceJson, String rewrittenJson, Set<String> knownPaths) {
         try {
-            return dataContainedIn(MAPPER.readTree(sourceJson), MAPPER.readTree(rewrittenJson));
+            return dataContainedIn(MAPPER.readTree(sourceJson), MAPPER.readTree(rewrittenJson), "", knownPaths);
         } catch (Throwable t) {
             Log.printStackTrace(t);
             // 判定不了就不写
@@ -286,7 +298,136 @@ public class JsonUtil {
         }
     }
 
-    private static boolean dataContainedIn(JsonNode source, JsonNode rewritten) {
+    /**
+     * 诊断用：找出「格式化回写」判定失败的第一处差异，形如
+     * {@code modelFieldsMap.Xxx.field : 磁盘值 -> 回写值}，供日志定位。
+     * 判定通过或解析失败返回空串。
+     */
+    public static String describeRewriteDiff(String sourceJson, String rewrittenJson) {
+        return describeRewriteDiff(sourceJson, rewrittenJson, null);
+    }
+
+    /**
+     * 同上，忽略 {@code knownPaths} 之外允许消失的键，好让日志报出真正的数据差异。
+     */
+    public static String describeRewriteDiff(String sourceJson, String rewrittenJson, Set<String> knownPaths) {
+        try {
+            return describeDiff(MAPPER.readTree(sourceJson), MAPPER.readTree(rewrittenJson), "", knownPaths);
+        } catch (Throwable t) {
+            Log.printStackTrace(t);
+            return "";
+        }
+    }
+
+    /**
+     * 回写后消失的键路径（碰到消失的组就整组记一条，不再往下展开），用于日志说明清掉了什么。
+     */
+    public static List<String> removedKeys(String sourceJson, String rewrittenJson) {
+        List<String> removed = new ArrayList<>();
+        try {
+            collectRemovedKeys(MAPPER.readTree(sourceJson), MAPPER.readTree(rewrittenJson), "", removed);
+        } catch (Throwable t) {
+            Log.printStackTrace(t);
+        }
+        return removed;
+    }
+
+    private static void collectRemovedKeys(JsonNode source, JsonNode rewritten, String path, List<String> removed) {
+        if (source == null || !source.isObject()) {
+            return;
+        }
+        if (rewritten == null || !rewritten.isObject()) {
+            removed.add(path.isEmpty() ? "<root>" : path);
+            return;
+        }
+        Iterator<Map.Entry<String, JsonNode>> it = source.fields();
+        while (it.hasNext()) {
+            Map.Entry<String, JsonNode> entry = it.next();
+            String childPath = path.isEmpty() ? entry.getKey() : path + "." + entry.getKey();
+            JsonNode rewrittenValue = rewritten.get(entry.getKey());
+            if (rewrittenValue == null) {
+                if (removed.size() < 20) {
+                    removed.add(childPath);
+                }
+            } else {
+                collectRemovedKeys(entry.getValue(), rewrittenValue, childPath, removed);
+            }
+        }
+    }
+
+    private static String describeDiff(JsonNode source, JsonNode rewritten, String path, Set<String> knownPaths) {
+        if (source == null || source.isNull()) {
+            return "";
+        }
+        if (source.isObject()) {
+            if (rewritten == null || !rewritten.isObject()) {
+                return path + " : 应为对象，回写成了 " + describeNode(rewritten);
+            }
+            Iterator<Map.Entry<String, JsonNode>> it = source.fields();
+            while (it.hasNext()) {
+                Map.Entry<String, JsonNode> entry = it.next();
+                String childPath = path.isEmpty() ? entry.getKey() : path + "." + entry.getKey();
+                JsonNode rewrittenValue = rewritten.get(entry.getKey());
+                if (rewrittenValue == null) {
+                    if (knownPaths != null && !knownPaths.contains(childPath)) {
+                        // 代码里已删除的废弃键，会被回写清掉，不算数据差异
+                        continue;
+                    }
+                    return childPath + " : 回写后键消失";
+                }
+                String diff = describeDiff(entry.getValue(), rewrittenValue, childPath, knownPaths);
+                if (!diff.isEmpty()) {
+                    return diff;
+                }
+            }
+            return "";
+        }
+        if (source.isArray()) {
+            if (rewritten == null || !rewritten.isArray()) {
+                return path + " : 应为数组，回写成了 " + describeNode(rewritten);
+            }
+            if (isScalarArray(source)) {
+                if (!isScalarArray(rewritten)) {
+                    return path + " : 应为标量数组，回写成了 " + describeNode(rewritten);
+                }
+                Map<String, Integer> need = new HashMap<>();
+                for (JsonNode node : source) {
+                    need.merge(node.toString(), 1, Integer::sum);
+                }
+                for (JsonNode node : rewritten) {
+                    need.computeIfPresent(node.toString(), (key, count) -> count - 1);
+                }
+                for (Map.Entry<String, Integer> left : need.entrySet()) {
+                    if (left.getValue() != null && left.getValue() > 0) {
+                        return path + " : 回写后缺少元素 " + trimForDiff(left.getKey());
+                    }
+                }
+                return "";
+            }
+            if (rewritten.size() < source.size()) {
+                return path + " : 数组变短，" + source.size() + " -> " + rewritten.size();
+            }
+            for (int i = 0; i < source.size(); i++) {
+                String diff = describeDiff(source.get(i), rewritten.get(i), path + "[" + i + "]", knownPaths);
+                if (!diff.isEmpty()) {
+                    return diff;
+                }
+            }
+            return "";
+        }
+        return source.equals(rewritten) ? "" : path + " : " + describeNode(source) + " -> " + describeNode(rewritten);
+    }
+
+    /** 诊断日志里的单值展示：超长截断，避免一条日志被整段名单撑爆 */
+    private static String describeNode(JsonNode node) {
+        return trimForDiff(node == null ? "null" : node.toString());
+    }
+
+    private static String trimForDiff(String text) {
+        return text.length() <= 60 ? text : text.substring(0, 60) + "...";
+    }
+
+    private static boolean dataContainedIn(JsonNode source, JsonNode rewritten, String path, Set<String> knownPaths) {
         if (source == null || source.isNull()) {
             return true;
         }
@@ -297,12 +438,16 @@ public class JsonUtil {
             Iterator<Map.Entry<String, JsonNode>> it = source.fields();
             while (it.hasNext()) {
                 Map.Entry<String, JsonNode> entry = it.next();
+                String childPath = path.isEmpty() ? entry.getKey() : path + "." + entry.getKey();
                 JsonNode rewrittenValue = rewritten.get(entry.getKey());
                 if (rewrittenValue == null) {
-                    // 只允许改格式、不许改数据：键消失即判定不无损
+                    // 只允许改格式、不许改数据：除非调用方确认这是代码里已删除的废弃键
+                    if (knownPaths != null && !knownPaths.contains(childPath)) {
+                        continue;
+                    }
                     return false;
                 }
-                if (!dataContainedIn(entry.getValue(), rewrittenValue)) {
+                if (!dataContainedIn(entry.getValue(), rewrittenValue, childPath, knownPaths)) {
                     return false;
                 }
             }
@@ -336,7 +481,7 @@ public class JsonUtil {
                 return false;
             }
             for (int i = 0; i < source.size(); i++) {
-                if (!dataContainedIn(source.get(i), rewritten.get(i))) {
+                if (!dataContainedIn(source.get(i), rewritten.get(i), path + "[" + i + "]", knownPaths)) {
                     return false;
                 }
             }
