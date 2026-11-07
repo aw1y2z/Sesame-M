@@ -75,6 +75,7 @@ public class AntOcean extends ModelTask {
     private BooleanModelField useUniversalPiece;
     private BooleanModelField replica;
     private BooleanModelField antfishEnable;  // 开启摸鱼功能
+    private BooleanModelField antfishAppraise;  // 摸鱼点赞得能量
     private BooleanModelField antfishAutoTask;  // 自动完成任务获得次数
 
 
@@ -90,6 +91,7 @@ public class AntOcean extends ModelTask {
         modelFields.addField(useUniversalPiece = new BooleanModelField("useUniversalPiece", "万能拼图 | 使用", false));
         modelFields.addField(replica = new BooleanModelField("replica", "潘多拉海域", false));
         modelFields.addField(antfishEnable = new BooleanModelField("antfishEnable", "海洋摸鱼 | 开启摸鱼", false));
+        modelFields.addField(antfishAppraise = new BooleanModelField("antfishAppraise", "海洋摸鱼|点赞30次", false).setDependsOn("antfishEnable"));
         modelFields.addField(antfishAutoTask = new BooleanModelField("antfishAutoTask", "海洋摸鱼 | 摸鱼任务", false).setDependsOn("antfishEnable"));
         modelFields.addField(AutoAntOceanFishBlackList = new BooleanModelField("AutoAntOceanFishBlackList", "海洋摸鱼 | 自动黑名单", true).setDependsOn("antfishAutoTask"));
         modelFields.addField(AntOceanFishBlackList = new SelectModelField("AntOceanFishBlackList", "摸鱼任务 | 黑名单列表", new LinkedHashSet<>(), AlipayAntOceanFishBlackList::getList).setDependsOn("AutoAntOceanFishBlackList"));
@@ -1285,12 +1287,17 @@ public class AntOcean extends ModelTask {
             // 2. 查询主页信息
             antfishQueryHomePage();
 
-            // 3. 查询并处理任务
+            // 3. 点赞得能量
+            if (antfishAppraise.getValue()) {
+                antfishAppraiseFish();
+            }
+
+            // 4. 查询并处理任务
             if (antfishAutoTask.getValue()) {
                 antfishHandleTasks();
             }
 
-            // 4. 执行摸鱼
+            // 5. 执行摸鱼
             touchfish();
 
 
@@ -1462,6 +1469,99 @@ public class AntOcean extends ModelTask {
             Log.err(TAG, "rescueFish err:", t);
         }
         return false;
+    }
+
+    /**
+     * 点赞别人的鱼得能量。
+     * <p>点赞(LIKE)与点踩(DISLIKE)奖励相同，均为每次 1g，此处固定用 LIKE，不伤他人。
+     * <p>每日上限由服务端 {@code appraiseRewardRemainNum} 给出（实测满额 30 次），归零即停。
+     * <p>一次列表可批量评价：列表每页约 10 条，逐条评完再重拉，避免每条都拉一次列表。
+     */
+    private void antfishAppraiseFish() {
+        try {
+            int totalEnergy = 0;
+            int count = 0;
+            // 护底：服务端若一直返回可评价的鱼（评价过却仍标 canAppraise），避免死循环
+            final int MAX_APPRAISE = 40;
+            outer:
+            while (count < MAX_APPRAISE) {
+                JSONObject jo = new JSONObject(AntOceanRpcCall.antfishQueryNeedAppraiseFishList());
+                if (!MessageUtil.checkResultCode(TAG, jo)) {
+                    break;
+                }
+                // 剩余可评价次数：0 表示今日上限已到
+                if (jo.optInt("appraiseRewardRemainNum", -1) == 0) {
+                    break;
+                }
+                JSONArray fishList = jo.optJSONArray("fishList");
+                if (fishList == null || fishList.length() == 0) {
+                    break;
+                }
+
+                boolean appraisedAny = false;
+                for (int i = 0; i < fishList.length() && count < MAX_APPRAISE; i++) {
+                    JSONObject fish = fishList.optJSONObject(i);
+                    if (fish == null) {
+                        continue;
+                    }
+                    JSONObject appraiseVO = fish.optJSONObject("appraiseVO");
+                    if (appraiseVO == null || !appraiseVO.optBoolean("canAppraise", false)) {
+                        continue;
+                    }
+
+                    String imageId = fish.optString("imageId", "");
+                    String seasonId = fish.optString("seasonId", "");
+                    // 兜底：被评价人优先取 appraiseVO 里的字段
+                    String targetUserId = appraiseVO.optString("receiveAppraiseUserId", "");
+                    if (targetUserId.isEmpty()) {
+                        targetUserId = fish.optString("userId", "");
+                    }
+                    if (imageId.isEmpty() || seasonId.isEmpty() || targetUserId.isEmpty()) {
+                        continue;
+                    }
+
+                    JSONObject appraiseJo = new JSONObject(AntOceanRpcCall.antfishFishAppraise(imageId, seasonId, targetUserId));
+                    if (!MessageUtil.checkResultCode(TAG, appraiseJo)) {
+                        Log.other("海洋摸鱼🐟点赞失败");
+                        break outer;
+                    }
+                    // rightsNums 是字符串，按字符串取再转数值
+                    JSONArray rewardList = appraiseJo.optJSONArray("appraiseRewardList");
+                    for (int j = 0; rewardList != null && j < rewardList.length(); j++) {
+                        JSONObject reward = rewardList.optJSONObject(j);
+                        if (reward == null) {
+                            continue;
+                        }
+                        JSONObject extInfo = reward.optJSONObject("extInfo");
+                        JSONObject popup = extInfo == null ? null : extInfo.optJSONObject("popup");
+                        if (popup != null) {
+                            Integer nums = StringUtil.parseIntOrNull(popup.optString("rightsNums", "0"));
+                            if (nums != null) {
+                                totalEnergy += nums;
+                            }
+                        }
+                    }
+                    count++;
+                    appraisedAny = true;
+                    // 上限归零则本轮结束，不必再翻下一页
+                    if (appraiseJo.optInt("appraiseRewardRemainNum", -1) == 0) {
+                        break outer;
+                    }
+                    TimeUtil.sleep(1000);
+                }
+                // 整页没有一条可评：再拉也是同一批，结束
+                if (!appraisedAny) {
+                    break;
+                }
+            }
+            if (count > 0) {
+                Log.other("海洋摸鱼🎖️点赞[" + count + "]次共获得" + totalEnergy + "g能量");
+            } else {
+                Log.i(TAG + "点赞摸鱼：今日无可点赞次数");
+            }
+        } catch (Throwable t) {
+            Log.err(TAG, "antfishAppraiseFish err:", t);
+        }
     }
 
     /**

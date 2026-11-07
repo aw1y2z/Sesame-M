@@ -270,4 +270,22 @@ public class AntOceanRpcCall {
         return ApplicationHook.requestString("alipay.antaifish.h5.touchfish", 
             "[{\"source\":\"ANT_OCEAN\",\"uniqueId\":\"" + getAntfishUniqueId() + "\"}]");
     }
+
+    /**
+     * 查询待评价的鱼列表（评价可得能量，每日有上限，响应里 appraiseRewardRemainNum 是剩余次数）
+     */
+    public static String antfishQueryNeedAppraiseFishList() {
+        return ApplicationHook.requestString("alipay.antaifish.h5.queryNeedAppraiseFishList",
+            "[{\"source\":\"ANT_OCEAN\",\"uniqueId\":\"" + getAntfishUniqueId() + "\"}]");
+    }
+
+    /**
+     * 评价某条鱼（获得能量）
+     * <p>{@code uniqueId} 为此接口专用格式：毫秒时间戳 + "_" + 8 位十六进制，与其它接口不同。
+     */
+    public static String antfishFishAppraise(String imageId, String seasonId, String targetUserId) {
+        String uniqueId = System.currentTimeMillis() + "_" + String.format("%08x", RandomUtil.nextInt(0, Integer.MAX_VALUE));
+        return ApplicationHook.requestString("alipay.antaifish.h5.fishAppraise",
+            "[{\"appraiseType\":\"LIKE\",\"imageId\":\"" + imageId + "\",\"seasonId\":\"" + seasonId + "\",\"source\":\"ANT_OCEAN\",\"targetUserId\":\"" + targetUserId + "\",\"uniqueId\":\"" + uniqueId + "\"}]");
+    }
 }
