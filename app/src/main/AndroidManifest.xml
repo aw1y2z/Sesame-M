@@ -2,9 +2,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <!--
+      不申请 INTERNET：本 APK 的界面进程不发起任何出站请求。
+      · AI 答题与各任务接口都在注入的支付宝进程里请求，用宿主自己的网络权限
+      · NanoHTTPD 监听 127.0.0.1:8080 也发生在宿主主进程，入站监听本就不需要该权限
+      · 因此配置页不再提供「测试响应」，改成只读提示
+    -->
+    <!--
+      配置写在 /sdcard/Android/media/<宿主包名>/ 下：
+      · Android 11+ 只需要 MANAGE_EXTERNAL_STORAGE（PermissionUtil 也只检查 isExternalStorageManager）
+      · Android 10 及以下才用得到这两个运行时权限，故用 maxSdkVersion 收窄，避免在高版本
+        装上一对永远拿不到、也用不到的可读写权限
+    -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
@@ -16,8 +31,8 @@
     </queries>
 
     <!--
-      usesCleartextTraffic 保留为 true：配置页的「自定义AI | 测试响应」按钮在模块 App 进程里
-      请求用户自填的接口地址，该地址可能是 http 的局域网/自建端点，禁明文会让测试直接失败。
+      不再声明 usesCleartextTraffic：本 APK 不发起请求，明文 http 是否放行取决于
+      支付宝自己的网络安全配置，与本 APK 无关。
     -->
     <application
         android:name=".SesameApplication"
@@ -28,7 +43,6 @@
         android:requestLegacyExternalStorage="true"
         android:roundIcon="@drawable/logo"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="true"
         tools:targetApi="q">
 
         <activity
@@ -44,7 +58,7 @@
 
         <activity
             android:name=".ui.miuix.MiuixSettingsActivity"
-            android:exported="true"
+            android:exported="false"
             android:resizeableActivity="true"
             tools:targetApi="n" />
 
@@ -60,13 +74,13 @@
 
         <activity
             android:name=".ui.miuix.MiuixExtensionsActivity"
-            android:exported="true"
+            android:exported="false"
             android:resizeableActivity="true"
             tools:targetApi="n" />
 
         <activity
             android:name=".ui.miuix.MiuixLogViewerActivity"
-            android:exported="true"
+            android:exported="false"
             android:resizeableActivity="true"
             tools:targetApi="n" />
 

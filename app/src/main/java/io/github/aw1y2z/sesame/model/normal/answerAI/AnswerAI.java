@@ -1,20 +1,14 @@
 package io.github.aw1y2z.sesame.model.normal.answerAI;
 
-import android.content.Context;
-import android.os.Handler;
-import android.os.Looper;
-
 import io.github.aw1y2z.sesame.data.Model;
 import io.github.aw1y2z.sesame.data.ModelFields;
 import io.github.aw1y2z.sesame.data.ModelGroup;
 import io.github.aw1y2z.sesame.data.TokenConfig;
-import io.github.aw1y2z.sesame.data.ViewAppInfo;
-import io.github.aw1y2z.sesame.data.modelFieldExt.EmptyModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.IntegerModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.StringModelField;
+import io.github.aw1y2z.sesame.data.modelFieldExt.TextModelField.ReadOnlyTextModelField;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.StringUtil;
-import io.github.aw1y2z.sesame.util.ToastUtil;
 
 import java.util.List;
 import java.util.Objects;
@@ -25,11 +19,6 @@ public class AnswerAI extends Model {
 
     /** 任务线程读取、boot 线程写入，用 volatile 保证可见性 */
     private static volatile Boolean enable = false;
-
-    /** 连通性自检提示词 */
-    private static final String AI_TEST_PROMPT = "这是一次接口连通性测试。请只回复 OK。";
-    /** 自检结果回显到 Toast 的最大长度 */
-    private static final int AI_TEST_RESULT_MAX_LENGTH = 120;
 
     /** 日志里题目与选项列表的最大字数：整题与全部选项都写进日志会显著撑大日志 */
     private static final int LOG_TITLE_MAX_LENGTH = 60;
@@ -52,7 +41,9 @@ public class AnswerAI extends Model {
     private final StringModelField customAIModel = new StringModelField("customAIModel", "自定义AI | 模型名", "");
     private final StringModelField customAIKey = new StringModelField("customAIKey", "自定义AI | 令牌", "");
     private final IntegerModelField customAIMaxTokens = new IntegerModelField("customAIMaxTokens", "自定义AI | 输出Token上限(0=不发)", 1024, 0, 8192);
-    private final EmptyModelField customAITest = new EmptyModelField("customAITest", "自定义AI | 测试响应", this::testConnection);
+    /** 只读提示：模块 App 已不申请 INTERNET，没有「测试响应」入口，参数只能靠用户自己填对 */
+    private final ReadOnlyTextModelField customAITestTip = new ReadOnlyTextModelField("customAITestTip",
+            "自定义AI | 模块不提供响应测试", "请确保地址、模型名与令牌填写正确，填错时答题会退回题库或首个选项");
 
     @Override
     public ModelFields getFields() {
@@ -61,7 +52,7 @@ public class AnswerAI extends Model {
         modelFields.addField(customAIModel);
         modelFields.addField(customAIKey);
         modelFields.addField(customAIMaxTokens);
-        modelFields.addField(customAITest);
+        modelFields.addField(customAITestTip);
         return modelFields;
     }
 
@@ -75,47 +66,7 @@ public class AnswerAI extends Model {
         }
     }
 
-    /**
-     * 「测试响应」按钮：用当前填写的配置发一次最简单的请求，结果用 Toast 强制回显，
-     * 让用户立刻确认地址/模型/令牌是否可用，不必去翻日志。
-     * <p>
-     * 网络请求放到子线程，避免在主线程阻塞或抛 NetworkOnMainThreadException。
-     */
-    private void testConnection() {
-        CustomAI tempAI = new CustomAI(customAIUrl.getValue(), customAIModel.getValue(), customAIKey.getValue(), customAIMaxTokens.getValue());
-        if (!tempAI.isConfigured()) {
-            showToast("请先填写接口地址、模型名与令牌");
-            return;
-        }
-        showToast("正在测试AI接口...");
-        new Thread(() -> {
-            String result = tempAI.getAnswerStr(AI_TEST_PROMPT);
-            if (result == null || result.trim().isEmpty()) {
-                showToast("AI接口测试失败：地址/模型/令牌有误或请求超时（详见日志）");
-                return;
-            }
-            showToast("AI接口测试成功：" + trimForLog(result, AI_TEST_RESULT_MAX_LENGTH));
-        }).start();
-    }
-
-    /**
-     * 配置页 Toast：用 android.widget.Toast + UI 进程自己的 applicationContext 实现。
-     * <p>
-     * 不能用模块侧的 {@code hook.Toast}：它内部要走 {@code ApplicationHook}（继承 libxposed 的
-     * XposedModule），而模块 App 自己的进程里没有 libxposed API，一调用就 NoClassDefFoundError 闪退。
-     * <p>
-     * 结果可能来自网络子线程，所以统一 post 回主线程再弹。
-     */
-    private static void showToast(String text) {
-        Context context = ViewAppInfo.getContext();
-        if (context == null) {
-            return;
-        }
-        Context appContext = context.getApplicationContext();
-        new Handler(Looper.getMainLooper()).post(() -> ToastUtil.show(appContext, text));
-    }
-
-    /** 日志/Toast 用：压缩空白并超长截断，避免整题与全部选项把日志撑大 */
+    /** 日志用：压缩空白并超长截断，避免整题与全部选项把日志撑大 */
     private static String trimForLog(String text, int maxLength) {
         if (text == null) {
             return "";
