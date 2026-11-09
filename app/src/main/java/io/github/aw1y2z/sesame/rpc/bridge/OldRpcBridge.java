@@ -115,7 +115,7 @@ public class OldRpcBridge implements RpcBridge {
                                         NotificationUtil.updateStatusText("登录超时");
                                         if (BaseModel.getTimeoutRestart().getValue()) {
                                             Log.record("尝试重新登录");
-                                            ApplicationHook.reLoginByBroadcast();
+                                            ApplicationHook.reLogin();
                                         }
                                     }
                                 } else if (msg.contains("[1004]") && "alipay.antmember.forest.h5.collectEnergy".equals(method)) {

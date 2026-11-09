@@ -1,6 +1,7 @@
 package io.github.aw1y2z.sesame.ui.miuix
 
 import android.content.Intent
+import io.github.aw1y2z.sesame.ui.HostBridge
 import android.os.Bundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -105,10 +106,9 @@ class MiuixSettingsActivity : MiuixBaseActivity() {
     }
 
     /**
-     * 统一落盘入口（二级/三级/四级同款实现）：
-     * 先用 hasFieldChanges() 短路「无字段级改动」的情况，确认有改动后走 force=true，
-     * 避免 ConfigV2.save() 内部再重复做一次全量序列化比较。
-     * <p>写盘失败也要出声：只提示成功会让用户以为存上了，实际改动无声消失。
+     * 统一落盘入口（二级/三级/四级同款）：无改动直接短路，有改动走 force=true，
+     * 免掉 save() 内部的全量序列化比较。
+     * <p>写盘失败必须出声，否则改动无声消失。
      */
     fun save() {
         if (!ConfigV2.hasFieldChanges()) return
@@ -122,20 +122,11 @@ class MiuixSettingsActivity : MiuixBaseActivity() {
 
     private fun sendRestartIfNeeded() {
         if (!StringUtil.isEmpty(userId)) {
-            try {
-                val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
-                intent.putExtra("userId", userId)
-                sendBroadcast(intent)
-            } catch (th: Throwable) {
-                Log.printStackTrace(th)
-            }
+            HostBridge.send(this, "restart", userId, null, false)
         }
     }
 
-    /**
-     * 打开一条搜索命中：选择型字段直接进四级编辑页；
-     * 其余类型进三级页，并把字段名当搜索词带过去，进去即只剩该字段。
-     */
+    /** 打开搜索命中：选择型进四级编辑页，其余进三级页并把字段名当搜索词带过去 */
     internal fun openFieldHit(hit: FieldHit) {
         if (hit.field.type in SELECTION_FIELD_TYPES) {
             startActivity(
@@ -190,13 +181,7 @@ fun SettingsContent(activity: MiuixSettingsActivity, userId: String?) {
                 FileUtil.backupConfigV2WithRolling(if (StringUtil.isEmpty(userId)) "默认" else userId!!)
                 if (!FileUtil.write2File(text, file)) throw IllegalStateException("write config failed")
                 if (!StringUtil.isEmpty(userId)) {
-                    try {
-                        val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
-                        intent.putExtra("userId", userId)
-                        context.sendBroadcast(intent)
-                    } catch (th: Throwable) {
-                        Log.printStackTrace(th)
-                    }
+                    HostBridge.send(context, "restart", userId, null, false)
                 }
                 Model.initAllModel()
                 ConfigPreload.prepare(userId)
@@ -335,8 +320,8 @@ internal data class FieldHit(
 )
 
 /**
- * 在全部模块的可见字段里搜关键字，返回命中项。
- * <p>可见性沿用三级页的判据（依赖的父字段未激活则不可见），保证搜到的字段点进去能看到。
+ * 在全部模块的可见字段里搜关键字。
+ * <p>可见性沿用三级页判据（父字段未激活则不可见），保证搜到的字段点进去能看到。
  */
 private fun buildFieldHits(query: String): List<FieldHit> {
     val result = ArrayList<FieldHit>()
@@ -361,11 +346,8 @@ private fun buildFieldHits(query: String): List<FieldHit> {
 }
 
 /**
- * 配置字段编辑项（原地展开编辑）。
- *
- * 值为「只写内存」：任何变更只调用 setObjectValue() 落在 ConfigV2 单例上，不触发磁盘写入。
- * 统一落盘由所在页面的退出流程负责（MiuixGroupFieldsActivity.saveAndFinish() / onBackPressed()），
- * 避免每次拨开关、每次提交输入都做一次「全量序列化 + 写盘 + 备份检查」。
+ * 配置字段编辑项（原地展开编辑）。变更只调 setObjectValue() 写内存，落盘交给页面退出流程，
+ * 否则每次拨开关、每次提交输入都要做一次全量序列化 + 写盘 + 备份检查。
  */
 @Composable
 fun FieldItem(field: ModelField<*>, onFieldChanged: (() -> Unit)? = null) {

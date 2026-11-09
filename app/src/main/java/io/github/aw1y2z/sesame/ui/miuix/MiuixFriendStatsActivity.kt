@@ -2,8 +2,6 @@ package io.github.aw1y2z.sesame.ui.miuix
 
 import android.content.Intent
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,14 +50,8 @@ private const val PENDING_PROFILE_FILE = "pending_profile.txt"
 /** 宿主包名 */
 private const val HOST_PACKAGE = "com.eg.android.AlipayGphone"
 
-/** 请求宿主打开好友主页的广播 action */
-private const val ACTION_OPEN_PROFILE = "com.eg.android.AlipayGphone.sesame.openProfile"
-
 /** 好友统计二级页:展示单向好友列表及其互动记录,与其它二级页面统一风格(LogTopBar)。 */
 class MiuixFriendStatsActivity : MiuixBaseActivity() {
-
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var pendingBroadcast: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,31 +60,21 @@ class MiuixFriendStatsActivity : MiuixBaseActivity() {
         }
     }
 
-    override fun onDestroy() {
-        pendingBroadcast?.let { mainHandler.removeCallbacks(it) }
-        pendingBroadcast = null
-        super.onDestroy()
-    }
-
     /**
-     * 打开好友主页。跳转必须由支付宝进程发起（模块 App 自己发 scheme 会被宿主判为不可信），
-     * 所以这里只做两件事：写待打开标记 + 拉起支付宝。
-     *
-     * 宿主在支付宝任意页面 resume 时就会消费标记并跳转，点击到出页面几乎是连续的；
-     * 广播只是标记没被消费时的兜底。
+     * 打开好友主页：写待打开标记 + 拉起支付宝，跳转必须由支付宝进程发起。
+     * <p>只能用 launcher intent 拉起，且不能改成从后台直接启动页面：前者保证会话是「自身入口」，
+     * 否则 appSchemeCheck 拦掉后续深链；后者系统会补一个透明中转页。
+     * <p>宿主在 onResume 与 onWindowFocusChanged(true) 两处消费标记：后台被拉起走前者，
+     * 小窗/分屏下本来就是 resumed、只能靠后者。
      */
     fun openFriendProfile(userId: String) {
         try {
-            // 主路径：支付宝进程一有页面 resume 就会读到该标记并立刻跳转，
-            // 冷启动、热启动都走这条，不需要等待
-            try {
-                FileUtil.write2File(
-                    "$userId\n${System.currentTimeMillis()}",
-                    File(FileUtil.MAIN_DIRECTORY_FILE, PENDING_PROFILE_FILE)
-                )
-            } catch (t: Throwable) {
-                Log.printStackTrace(t)
-            }
+            // 先落标记：宿主一 resume / 拿到窗口焦点就读它跳转
+            FileUtil.write2File(
+                "$userId\n${System.currentTimeMillis()}",
+                File(FileUtil.MAIN_DIRECTORY_FILE, PENDING_PROFILE_FILE)
+            )
+            // 再拉起：只有「自身入口」状态，宿主进程内的深链才不会被 appSchemeCheck 拦掉
             packageManager.getLaunchIntentForPackage(HOST_PACKAGE)?.let {
                 it.addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK
@@ -100,20 +82,6 @@ class MiuixFriendStatsActivity : MiuixBaseActivity() {
                 )
                 startActivity(it)
             }
-            // 兜底：标记写入失败或没被消费时再补一次广播。
-            // 连续点不同好友先取消上一次的，避免旧广播把上一个好友又拉出来。
-            pendingBroadcast?.let { mainHandler.removeCallbacks(it) }
-            val runnable = Runnable {
-                try {
-                    sendBroadcast(
-                        Intent(ACTION_OPEN_PROFILE).putExtra("userId", userId)
-                    )
-                } catch (t: Throwable) {
-                    Log.printStackTrace(t)
-                }
-            }
-            pendingBroadcast = runnable
-            mainHandler.postDelayed(runnable, 1500)
         } catch (t: Throwable) {
             Log.printStackTrace(t)
         }
@@ -285,10 +253,7 @@ private enum class FriendSort {
     WEEK, ALL
 }
 
-/**
- * 排序芯片：点当前字段切升/降序，点另一字段换排序。
- * 箭头只在选中时出现，未选中的 chip 不该看起来像已排好序。
- */
+/** 排序芯片：箭头只在选中时出现，避免未选中的 chip 看起来已排好序 */
 @Composable
 private fun SortChip(label: String, selected: Boolean, ascending: Boolean, onClick: () -> Unit) {
     val bg = if (selected) MiuixTheme.colorScheme.primaryContainer

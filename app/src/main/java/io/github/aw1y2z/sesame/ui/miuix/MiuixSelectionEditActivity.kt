@@ -1,6 +1,7 @@
 package io.github.aw1y2z.sesame.ui.miuix
 
 import android.content.Intent
+import io.github.aw1y2z.sesame.ui.HostBridge
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
@@ -65,10 +66,7 @@ import top.yukonga.miuix.kmp.preference.SliderPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
-/**
- * 选填编辑页（四级）：编辑 SELECT/SELECT_ONE/SELECT_AND_COUNT/SELECT_AND_COUNT_ONE 类型字段。
- * 从 MiuixGroupFieldsActivity 跳转进来，通过 Intent 传递 userId、groupCode、fieldCode、modelCode。
- */
+/** 选填编辑页（四级）：编辑 SELECT* 类型字段，Intent 传入 userId/groupCode/fieldCode/modelCode */
 class MiuixSelectionEditActivity : MiuixBaseActivity() {
 
     companion object {
@@ -83,11 +81,7 @@ class MiuixSelectionEditActivity : MiuixBaseActivity() {
     private var fieldCode: String? = null
     private var modelCode: String? = null
 
-    /**
-     * 由 Compose 内容注入的“保存未提交更改”回调。
-     * 顶部返回按钮与系统返回键（手势/物理键）都会先调用它，再退出，
-     * 避免 dirty 变更因直接 finish 而丢失。
-     */
+    /** 顶部返回与系统返回键都先调用它再退出，避免 dirty 变更因直接 finish 而丢失 */
     internal var saveHandler: (() -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -263,13 +257,7 @@ fun SelectionEditContent(
             // 本页的保存是"退出时隐式落盘"，成功不弹气泡（失败才提示）
             dirty = false
             if (userId != null) {
-                try {
-                    val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
-                    intent.putExtra("userId", userId)
-                    activity.sendBroadcast(intent)
-                } catch (th: Throwable) {
-                    Log.printStackTrace(th)
-                }
+                HostBridge.send(activity, "restart", userId, null, false)
             }
         } else {
             ToastUtil.show(activity, "保存失败")

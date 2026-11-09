@@ -1,6 +1,7 @@
 package io.github.aw1y2z.sesame.ui.miuix
 
 import android.content.Intent
+import io.github.aw1y2z.sesame.ui.HostBridge
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -68,10 +69,7 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlin.math.roundToInt
 
-/**
- * 配置字段页（三级）：显示某个分组下的所有配置字段。
- * 从 MiuixSettingsActivity 跳转进来，通过 Intent 传递 userId 和 groupCode。
- */
+/** 配置字段页（三级）：某分组下的全部配置字段，Intent 传入 userId 与 groupCode */
 class MiuixGroupFieldsActivity : MiuixBaseActivity() {
 
     companion object {
@@ -118,10 +116,9 @@ class MiuixGroupFieldsActivity : MiuixBaseActivity() {
     }
 
     /**
-     * 统一落盘入口：本页字段变更只写内存，只有真正退出时才调用这里写一次磁盘。
-     * 先用 hasFieldChanges() 判断是否有字段级改动（无改动直接短路，不写盘、不提示），
-     * 确认有改动后走 force=true，避免 ConfigV2.save() 内部再做一次全量序列化比较。
-     * <p>没有账号或写盘失败时都要出声：否则用户以为存上了，实际改动无声消失。
+     * 统一落盘入口：本页字段变更只写内存，退出时写一次盘；有改动走 force=true，
+     * 免掉 save() 内部的全量序列化比较。
+     * <p>没有账号或写盘失败必须出声，否则改动无声消失。
      */
     fun save() {
         val changed = ConfigV2.hasFieldChanges()
@@ -142,23 +139,14 @@ class MiuixGroupFieldsActivity : MiuixBaseActivity() {
 
     private fun sendRestartIfNeeded() {
         if (!StringUtil.isEmpty(userId)) {
-            try {
-                val intent = Intent("com.eg.android.AlipayGphone.sesame.restart")
-                intent.putExtra("userId", userId)
-                sendBroadcast(intent)
-            } catch (th: Throwable) {
-                Log.printStackTrace(th)
-            }
+            HostBridge.send(this, "restart", userId, null, false)
         }
     }
 }
 
 /**
- * 扁平化后的列表行：把「模型标题」和「字段」都提升为 LazyColumn 的独立 item，
- * 让虚拟化真正下沉到字段级。
- *
- * 原先每个 ModelConfig 是一个 item、内部用 fields.forEach 组合全部字段，
- * 导致 Forest 组（77 个字段）一旦进入视口就要一次性组合、measure、layout 所有字段。
+ * 扁平化列表行：模型标题与字段都是 LazyColumn 的独立 item，虚拟化下沉到字段级。
+ * <p>否则一个 ModelConfig 就是一个 item，Forest 组（77 字段）进视口要一次性组合、measure、layout。
  */
 private sealed interface GroupFieldsRow {
     val key: String
@@ -221,22 +209,13 @@ fun GroupFieldsContent(activity: MiuixGroupFieldsActivity, userId: String?, grou
     }
 
     /**
-     * 执行当前分组的任务。
-     * 本进程是模块 App 的 UI 进程，没有 libxposed 类（ApplicationHook/hook.Toast/NotificationUtil 一碰
-     * 就 NoClassDefFoundError），任务循环也不能压在主线程上，所以只发广播让注入进程去跑。
-     * BASE 分组由注入侧解释为"执行全部任务"。
+     * 执行当前分组：本进程没有 libxposed 类（一碰就 NoClassDefFoundError），也不能压主线程，
+     * 交给宿主进程跑；BASE 由注入侧解释为「执行全部任务」。
      */
     val onExecute = remember {
         {
-            try {
-                val intent = Intent("com.eg.android.AlipayGphone.sesame.execute")
-                intent.putExtra("group", group.getCode())
-                activity.sendBroadcast(intent)
-                ToastUtil.show(activity, "已发送执行请求：${group.getName()}")
-            } catch (th: Throwable) {
-                Log.printStackTrace(th)
-                ToastUtil.show(activity, "执行失败: ${th.message}")
-            }
+            HostBridge.send(activity, "execute", null, group.getCode(), false)
+            ToastUtil.show(activity, "已发送执行请求：${group.getName()}")
             Unit
         }
     }
@@ -350,20 +329,14 @@ fun GroupFieldsContent(activity: MiuixGroupFieldsActivity, userId: String?, grou
     }
 }
 
-/**
- * 三级页搜索匹配：字段名、编码或描述包含关键字（忽略大小写）。
- * 与四级页按 name/id 过滤的语义保持一致，这里用字段的 name/code/description。
- */
+/** 三级页搜索：字段名/编码/描述含关键字（忽略大小写），与四级页按 name/id 过滤的语义一致 */
 internal fun fieldMatchesSearch(query: String, field: ModelField<*>): Boolean {
     return field.name?.contains(query, ignoreCase = true) == true
         || field.code.contains(query, ignoreCase = true)
         || field.description?.contains(query, ignoreCase = true) == true
 }
 
-/**
- * 单个字段行。相邻行背景一致、圆角只在一组字段的首尾外露，
- * 因此视觉上仍是一张连续的卡片，但每一行都能被 LazyColumn 独立复用/回收。
- */
+/** 单个字段行：圆角只在一组首尾外露，视觉上仍是一张连续卡片，但每行可被独立复用/回收 */
 @Composable
 private fun GroupFieldRow(
     activity: MiuixGroupFieldsActivity,

@@ -13,6 +13,7 @@ import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import io.github.aw1y2z.sesame.ui.HostBridge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -110,10 +111,7 @@ class MiuixMainActivity : MiuixBaseActivity() {
     private lateinit var titleRunner: Runnable
 
     init {
-        /**
-         * 激活探测:仅当真实状态仍为 DISABLE 时才显示未激活,并在超时前周期性重试,
-         * 避免覆盖晚到的 onServiceBind 激活信号,也避免 XposedService 绑定较慢时误报未激活
-         */
+        /** 激活探测:仅当状态仍为 DISABLE 才显示未激活并周期性重试,避免覆盖晚到的 onServiceBind */
         titleRunner = Runnable {
             if (ViewAppInfo.getRunType() == RunType.DISABLE) {
                 runTypeProbeTimes++
@@ -133,9 +131,8 @@ class MiuixMainActivity : MiuixBaseActivity() {
         private const val MAX_RUN_TYPE_PROBE_TIMES = 5
 
         /**
-         * 设备显示名:优先读市场名(如 Xiaomi 13)。
-         * 小米/红米及多数云手机、模拟器的 ro.product.model 只是内部型号编号(如 2211133C),
-         * 多设备会显示相同,须用 ro.product.marketname 才有人类可读名称。
+         * 设备显示名:优先读 ro.product.marketname。
+         * 小米/红米及多数模拟器的 ro.product.model 只是内部型号,多设备会重复。
          */
         fun getDeviceDisplayName(): String {
             try {
@@ -160,6 +157,12 @@ class MiuixMainActivity : MiuixBaseActivity() {
             if (action != null) {
                 when (action) {
                     "io.github.aw1y2z.sesame.status" -> {
+                        // 回包必须带本机已配对的令牌：缺失或对不上就是别人伪造的探活，忽略
+                        val token = intent.getStringExtra("token")
+                        if (token == null || token != HostBridge.getToken(context)) {
+                            Log.i("status reply without valid token, ignored")
+                            return
+                        }
                         // 模块已被 LSPosed 启用并注入支付宝，标记为已激活
                         ViewAppInfo.setRunTypeByCode(RunType.MODEL.getCode())
                         runTypeProbeTimes = 0
@@ -200,6 +203,8 @@ class MiuixMainActivity : MiuixBaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 回到前台补一次配对：首次启动时宿主多半没在跑，用户开完支付宝再回来就通了
+        HostBridge.ensurePaired(this)
         // 激活状态探测独立于存储权限：防止 titleRunner 重复累积，先清空再启动
         if (RunType.DISABLE == ViewAppInfo.getRunType()) {
             handler.removeCallbacks(titleRunner)
@@ -211,8 +216,7 @@ class MiuixMainActivity : MiuixBaseActivity() {
     }
 
     /**
-     * 检查文件权限：已授权则每次都重读统计。
-     * <p>权限早已授予时也要刷新——否则从配置页或后台返回首页，统计仍是旧值（只有退出重进才更新）。
+     * 检查文件权限：已授权也要重读统计，否则从配置页或后台返回首页仍是旧值。
      */
     private fun checkPermissionAndRefresh() {
         hasRequestedPermission = false
@@ -236,9 +240,8 @@ class MiuixMainActivity : MiuixBaseActivity() {
     }
 
     /**
-     * 重新从统计文件加载并通知首页表格刷新。
-     * 基于可观察的 statisticsVersion 触发 Compose 重组,解决"首次进入首页统计为 0、
-     * 必须进入配置返回后才刷新"的问题(此前 StatisticsTable 直接读静态单例,单例变化不会重组)。
+     * 重新加载统计并刷新首页。
+     * <p>靠可观察的 statisticsVersion 触发重组:静态单例变化不会重组,首页会一直是 0。
      */
     fun refreshStatistics() {
         if (!hasPermission) return
@@ -266,46 +269,26 @@ class MiuixMainActivity : MiuixBaseActivity() {
     }
 
     fun sendStatus() {
-        try {
-            isClick = true
-            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.status"))
-        } catch (th: Throwable) {
-            Log.i("view sendBroadcast status err:")
-            Log.printStackTrace(th)
-        }
+        isClick = true
+        HostBridge.send(this, "status", null, null, false)
     }
 
     /** 向支付宝进程查询本模块注入状态（不弹 Toast），由 titleRunner 周期性调用 */
     fun sendQueryBroadcast() {
-        try {
-            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.status"))
-        } catch (th: Throwable) {
-            Log.i("view sendBroadcast status err:")
-            Log.printStackTrace(th)
-        }
+        HostBridge.send(this, "status", null, null, false)
+    }
+
+    /**
+     * 让注入进程整体重启（重新初始化并重挂 hook），用于必须重挂的开关如「使用新接口」；
+     * 只重载 AppConfig 的 broadcastReloadConfig() 不够。
+     */
+    fun broadcastRestart() {
+        HostBridge.send(this, "restart", null, null, false)
     }
 
     /** 通知支付宝进程重载共享配置（日志开关等），使开关在注入进程中即时生效 */
-    /**
-     * 让注入进程整体重启（重新初始化并重挂 hook）。
-     * 适用于改完必须重新初始化的开关，比如「使用新接口」要重挂 RPC bridge；
-     * 只是重载 AppConfig 的 broadcastReloadConfig() 不够用。
-     */
-    fun broadcastRestart() {
-        try {
-            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.restart"))
-        } catch (t: Throwable) {
-            Log.printStackTrace(t)
-        }
-    }
-
     fun broadcastReloadConfig() {
-        try {
-            sendBroadcast(Intent("com.eg.android.AlipayGphone.sesame.reloadConfig"))
-        } catch (th: Throwable) {
-            Log.i("view sendBroadcast reloadConfig err:")
-            Log.printStackTrace(th)
-        }
+        HostBridge.send(this, "reloadConfig", null, null, false)
     }
 
     fun openUrl(url: String) {
@@ -676,7 +659,12 @@ fun LogsTab(activity: MiuixMainActivity) {
     SmallTitle(text = "系统记录")
     CardColumn {
         var debug by remember { mutableStateOf(AppConfig.INSTANCE.enableDebugLog ?: false) }
-        LogSwitchRow("抓包记录", debug, onClick = { openLog(activity, LogType.DEBUG) }) {
+        LogSwitchRow(
+            "抓包记录", debug,
+            onClick = { openLog(activity, LogType.DEBUG) },
+            // 同时是 /debugHandler 的门禁：开了等于允许 PC 端打任意 RPC
+            summary = "同时允许 PC 调试"
+        ) {
             debug = it
             AppConfig.INSTANCE.enableDebugLog = it
             AppConfig.save()
@@ -704,16 +692,21 @@ fun LogsTab(activity: MiuixMainActivity) {
 }
 
 /**
- * 日志条目行：**点按整行**进入对应日志详情，右侧开关控制是否记录。
- * 用库的 SwitchPreference 渲染，字体（样式/字重/颜色）与设置页的行由同一组件保证一致；
- * 它的 insideMargin 覆写为上下 8dp（库默认 16dp）以尽量贴近日志页原来的行距；
- * 它没有 onClick 参数，所以外层再套一层可点区域实现"点整行"。
+ * 日志条目行：点按整行进详情，右侧开关控制是否记录；用库的 SwitchPreference 保证字体与设置页一致。
+ * <p>insideMargin 覆写为 8dp（库默认 16dp）贴合原行距；它没有 onClick，外层再套一层可点区域。
  */
 @Composable
-fun LogSwitchRow(title: String, checked: Boolean, onClick: () -> Unit, onCheckedChange: (Boolean) -> Unit) {
+fun LogSwitchRow(
+    title: String,
+    checked: Boolean,
+    onClick: () -> Unit,
+    summary: String? = null,
+    onCheckedChange: (Boolean) -> Unit
+) {
     Box(Modifier.fillMaxWidth()) {
         SwitchPreference(
             title = title,
+            summary = summary,
             checked = checked,
             onCheckedChange = onCheckedChange,
             // 覆写库默认的 16dp 上下内边距，尽量贴近日志页原来的行距（左右仍是 16dp，与设置页一致）

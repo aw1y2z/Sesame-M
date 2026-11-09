@@ -119,8 +119,55 @@ public class ApplicationHook extends XposedModule {
 
     /** 模块 App 自己的包名：须与 app/build.gradle 的 applicationId 一致，用于校验广播发送方 */
     private static final String MODULE_PACKAGE_NAME = "io.github.aw1y2z.sesame";
+    /** 宿主包名：配对回包与状态回包必须定向到它，否则第三方也能收到 */
+    private static final String HOST_PACKAGE_NAME = "com.eg.android.AlipayGphone";
     /** adb shell 的 uid：`adb shell am broadcast` 以它发送，放行以便命令行调试 */
     private static final int SHELL_UID = 2000;
+
+    /** App → 宿主：请求配对。无校验（回包定向且幂等），第三方触发也拿不到令牌 */
+    public static final String ACTION_PAIR_REQUEST = HOST_PACKAGE_NAME + ".sesame.pair.request";
+    /** 宿主 → App：配对回包，带令牌与 challenge，必须 setPackage 定向 */
+    public static final String ACTION_PAIR_RESULT = MODULE_PACKAGE_NAME + ".pair.result";
+    /** 系统代发：定时唤醒。靠 alarm_nonce 校验，不依赖发送方 uid */
+    public static final String ACTION_ALARM_EXECUTE = HOST_PACKAGE_NAME + ".sesame.alarm.execute";
+    /** App → 宿主：带令牌的受控通道（restart/reloadConfig/execute/status/openProfile） */
+    public static final String ACTION_CONTROL = HOST_PACKAGE_NAME + ".sesame.control";
+    /** 宿主 → App：control 的 status 回包，必须 setPackage 定向 */
+    public static final String ACTION_STATUS_REPLY = MODULE_PACKAGE_NAME + ".status";
+
+    /**
+     * control 通道接受的 op。{@code rpctest} 绝不入内：那是「任意 method + data 打进 RPC 层」，
+     * 只在调试场景走 HTTP；森林查询、走路路径改走 {@code forestQuery}/{@code walkPath}，
+     * method 由宿主侧按枚举校验，等价于固定动作。
+     */
+    private static final java.util.Set<String> CONTROL_OPS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "restart", "reloadConfig", "execute", "status", "openProfile", "forestQuery", "walkPath"));
+    /** 森林查询允许的 method，与扩展页按钮一一对应 */
+    private static final java.util.Set<String> FOREST_QUERY_METHODS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "getWateredItems", "getWateringItems", "getTreeItems", "getNewTreeItems",
+            "queryAreaTrees", "getUnlockTreeItems", "fillWateredFriendList"));
+    /** 自定义走路路径允许的 method */
+    private static final java.util.Set<String> WALK_PATH_METHODS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "addCustomWalkPathId", "addCustomWalkPathIdQueue", "clearCustomWalkPathIdQueue"));
+    /**
+     * control 通道频控：按 op 分维度计时。共用一张表时探活（3s 一次）会永远撞窗口，
+     * 并让紧接着的 restart/execute 被判为「过于频繁」。
+     */
+    private static final long CONTROL_MIN_INTERVAL_STATUS = 2_000L;
+    private static final long CONTROL_MIN_INTERVAL_RESTART = 10_000L;
+    private static final long CONTROL_MIN_INTERVAL_EXECUTE = 60_000L;
+    /** 跳转兜底是 App 侧 1.5s 后补发，窗口必须比它短，否则连点不同好友时兜底会被吞掉 */
+    private static final long CONTROL_MIN_INTERVAL_OPEN_PROFILE = 1_000L;
+    private static final java.util.Map<String, java.util.concurrent.atomic.AtomicLong> lastControlAt =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 配对请求的频控：第三方刷这条 action 只会让我们多发定向广播 */
+    private static final long PAIR_MIN_INTERVAL = 60_000L;
+    private static final java.util.concurrent.atomic.AtomicLong lastPairAt =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    /** 本进程使用的 HTTP 鉴权令牌：配对口令与闹钟 nonce 都由它派生 */
+    private static volatile String httpToken;
+    /** 当前 hook 实例：initHandler 一族是实例方法，受控通道需要从静态入口回调它们 */
+    private static volatile ApplicationHook self;
 
     @Getter
     private static volatile Context context = null; // 全局上下文，对应 Kotlin 的 appContext
@@ -177,13 +224,13 @@ public class ApplicationHook extends XposedModule {
 
     @Override
     public void onModuleLoaded(@NonNull XposedModuleInterface.ModuleLoadedParam param) {
+        self = this;
         XHelpers.init(this);
         log(4, TAG, "event=module_loaded api=" + getApiVersion()
                 + " framework=" + getFrameworkName() + " version=" + getFrameworkVersion());
         try {
-            // 主进程模块加载起点标记：置于 AppConfig.load 之前，供 App 日志查看器把整个
-            // 加载阶段（hook/CaptchaHook/加载完成等）归到其后一轮执行的开头，而非上一轮末尾。
-            // 仅主进程打印，避免各子进程刷噪声；与 handleLoadPackage 内的兜底打印共用去重标志
+            // 加载起点标记：置于 AppConfig.load 之前，供日志查看器把整个加载阶段归到其后一轮的开头。
+            // 仅主进程打印，与 handleLoadPackage 的兜底打印共用去重标志
             if (ClassUtil.PACKAGE_NAME.equals(getCurrentProcessName(ClassUtil.PACKAGE_NAME)) && !initStartLogged) {
                 initStartLogged = true;
                 Log.i("模块初始化开始");
@@ -197,7 +244,7 @@ public class ApplicationHook extends XposedModule {
             Application app = (Application) Class.forName("android.app.ActivityThread")
                     .getMethod("currentApplication").invoke(null);
             if (app != null) {
-                app.sendBroadcast(new Intent("io.github.aw1y2z.sesame.status"));
+                sendStatusBroadcast(app);
             }
         } catch (Throwable t) {
             // 模块激活相关步骤（配置加载/激活标记/激活广播）失败必须可见，否则「模块没生效」毫无线索
@@ -286,9 +333,8 @@ public class ApplicationHook extends XposedModule {
                         AuthCodeHelper.init(classLoader);
                         // 小程序抓包（游戏等小程序数据）：与日志页「抓包记录」共用开关
                         MiniProgramHook.install(classLoader, processName);
-                        // 启动时不再调用 getAuthCode：返回值本就被丢弃，而它在当前支付宝版本上必然失败
-                        //（自建实例未走宿主依赖注入，内部 facade 为 null），只会在日志里留下噪音
-                        // 直接同步调用：此前试过的异步写法未采用，勿据旧注释以为此处不阻塞
+                        // 同步调用：异步写法会被当成不阻塞，实际这里会等初始化完成
+                        // 启动时不再调 getAuthCode：返回值被丢弃，且在当前版本必然失败（facade 为 null）
                         initSimplePageManager();
                     } catch (Exception e) {
                         Log.printStackTrace(e);
@@ -349,8 +395,9 @@ public class ApplicationHook extends XposedModule {
             } catch (Throwable t) {
                 Log.err(TAG, "hook login err:", t);
             }
-            // 好友主页走 alipays:// scheme，系统会先起一个空白中转页 SchemeLauncherActivity，
-            // 表现为界面闪一下。这里把它换成透明无标题主题并清掉窗口背景，跳转逻辑不受影响。
+            // 只有兜底走 alipays:// 时才会创建这个中转页，设透明主题减轻闪烁。
+            // 不要靠改窗口尺寸/alpha 隐藏它：自由窗口下边界由系统按任务计算，压不住；
+            // 残留的 alpha=0 窗口盖在主界面上就是黑屏。
             try {
                 XHelpers.findAndHookMethod("com.alipay.mobile.quinox.SchemeLauncherActivity", classLoader, "onCreate", android.os.Bundle.class, new XC_MethodHook() {
                     @Override
@@ -359,22 +406,6 @@ public class ApplicationHook extends XposedModule {
                             if (param.thisObject instanceof Activity) {
                                 ((Activity) param.thisObject).setTheme(android.R.style.Theme_Translucent_NoTitleBar);
                             }
-                        } catch (Throwable ignored) {
-                        }
-                    }
-
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            if (!(param.thisObject instanceof Activity)) {
-                                return;
-                            }
-                            android.view.Window window = ((Activity) param.thisObject).getWindow();
-                            if (window == null) {
-                                return;
-                            }
-                            window.setBackgroundDrawable(null);
-                            window.setDimAmount(0f);
                         } catch (Throwable ignored) {
                         }
                     }
@@ -427,6 +458,30 @@ public class ApplicationHook extends XposedModule {
             } catch (Throwable t) {
                 Log.err(TAG, "hook Activity.onResume err:", t);
             }
+            // 支付宝以小窗/分屏形态在前台时，被模块 App 拉起只是抢到窗口焦点，不会重新走 onResume，
+            // 标记就没人消费，最后落到兜底广播——那条路要在后台任务里启动页面，系统必补一个中转页。
+            // 焦点到手就消费，此时支付宝已经在前台，跳转就是普通的前台启动。
+            try {
+                XHelpers.findAndHookMethod("android.app.Activity", classLoader, "onWindowFocusChanged", boolean.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (!(param.thisObject instanceof Activity) || param.args.length == 0) {
+                                return;
+                            }
+                            if (!Boolean.TRUE.equals(param.args[0])) {
+                                return;
+                            }
+                            checkPendingProfile((Activity) param.thisObject);
+                        } catch (Throwable th) {
+                            Log.err(TAG, "checkPendingProfile in onWindowFocusChanged err:", th);
+                        }
+                    }
+                });
+                Log.i(TAG, "hook Activity.onWindowFocusChanged successfully");
+            } catch (Throwable t) {
+                Log.err(TAG, "hook Activity.onWindowFocusChanged err:", t);
+            }
             try {
                 XHelpers.findAndHookMethod("android.app.Service", classLoader, "onCreate", new XC_MethodHook() {
 
@@ -448,12 +503,8 @@ public class ApplicationHook extends XposedModule {
                         registerBroadcastReceiver(appService);
 
                         // 主动通知 App 本模块已被 LSPosed 启用并注入支付宝，用于显示「已激活」
-                        try {
-                            appService.sendBroadcast(new Intent("io.github.aw1y2z.sesame.status"));
-                        } catch (Throwable t) {
-                            // 广播失败会导致 UI 迟迟显示「未激活」，留一行便于排查
-                            Log.i(TAG, "发送激活状态广播失败: " + t);
-                        }
+                        // 广播失败会导致 UI 迟迟显示「未激活」，sendStatusBroadcast 内部已记日志
+                        sendStatusBroadcast(appService);
 
                         Log.i(TAG, "Service onCreate");
                         context = appService.getApplicationContext();
@@ -582,17 +633,17 @@ public class ApplicationHook extends XposedModule {
                         destroyHandler(true);
                         FriendWatch.unload();
                         Statistics.unload();
-                        restartByBroadcast();
+                        // 前台服务已销毁，紧接着要跑一轮，否则白等一个查询间隔
+                        restartSelf(true);
                     }
                 });
             } catch (Throwable t) {
                 Log.err(TAG, "hook service onDestroy err:", t);
             }
-            // ---- 宿主的前后台询问：默认仍按原逻辑"谎报"，唯独风控/滑块链路在真实后台时如实回答 ----
-            // 原先这四个 hook 一律哄宿主"你在前台"，模块的后台任务（H5/RPC）才跑得动；
-            // 副作用是滑块验证也被判定为可展示，而后台拿不到可见窗口 →
-            // 滑块界面出不来、验证流程一直等用户滑动 → 切回支付宝即卡死。
-            // 现在改为：先问宿主自己拿真值（callOriginal），只有"真在后台 + 询问方是风控/滑块链路"才说实话。
+            // ---- 宿主的前后台询问：默认谎报"在前台"，唯独风控/滑块链路在真实后台时如实回答 ----
+            // 一律谎报能让后台 H5/RPC 跑起来，但滑块会被判定为可展示、后台又拿不到窗口，
+            // 验证流程死等用户滑动，切回支付宝即卡死。所以先 callOriginal 取真值，
+            // 只有"真在后台 + 询问方是风控/滑块"才说实话。
             try {
                 XHelpers.findAndHookMethod("com.alipay.mobile.common.fgbg.FgBgMonitorImpl", classLoader, "isInBackground", new XC_MethodHook() {
                     @Override
@@ -640,9 +691,18 @@ public class ApplicationHook extends XposedModule {
 
     private static void setWakenAtTimeAlarm() {
         try {
+            // 闹钟口令由令牌派生，令牌没解析出来时排出去的 PendingIntent 一定通不过校验，
+            // 到点才发现等于整轮唤醒白等：这里先补一次解析，仍取不到就干脆不排。
+            if (alarmNonce() == null) {
+                resolveHttpToken();
+            }
+            if (alarmNonce() == null) {
+                Log.record("定时唤醒未设置#令牌不可用，闹钟口令无法派生");
+                return;
+            }
             unsetWakenAtTimeAlarm();
             try {
-                PendingIntent pendingIntent = PendingIntent.getBroadcast(context, 0, new Intent("com.eg.android.AlipayGphone.sesame.execute"), getPendingIntentFlag());
+                PendingIntent pendingIntent = PendingIntent.getBroadcast(context, 0, alarmIntent(), getPendingIntentFlag());
                 Calendar calendar = Calendar.getInstance();
                 calendar.add(Calendar.DAY_OF_MONTH, 1);
                 calendar.set(Calendar.HOUR_OF_DAY, 0);
@@ -669,7 +729,7 @@ public class ApplicationHook extends XposedModule {
                         Calendar wakenAtTimeCalendar = TimeUtil.getTodayCalendarByTimeStr(wakenAtTime);
                         if (wakenAtTimeCalendar != null) {
                             if (wakenAtTimeCalendar.compareTo(nowCalendar) > 0) {
-                                PendingIntent wakenAtTimePendingIntent = PendingIntent.getBroadcast(context, seq, new Intent("com.eg.android.AlipayGphone.sesame.execute"), getPendingIntentFlag());
+                                PendingIntent wakenAtTimePendingIntent = PendingIntent.getBroadcast(context, seq, alarmIntent(), getPendingIntentFlag());
                                 if (setAlarmTask(wakenAtTimeCalendar.getTimeInMillis(), wakenAtTimePendingIntent)) {
                                     String wakenAtTimeKey = seq + "|" + wakenAtTime;
                                     wakenAtTimeAlarmMap.put(wakenAtTimeKey, wakenAtTimePendingIntent);
@@ -716,20 +776,16 @@ public class ApplicationHook extends XposedModule {
 
     @SuppressLint("WakelockTimeout")
     /**
-     * 切换账号 / 首启的重载入口。
-     * 重载（force=true）包含大量文件 IO、整份配置 JSON 反序列化、反射建 Model、逐 Model 装 Hook，
-     * 这些若在「主线程」同步执行会把支付宝界面卡住（表现为"切号卡死不动"）。
-     * 因此这里只做需要 UI 反馈的快速前置检查，真正的重活统一交给 {@link #runInit} 在后台线程执行。
+     * 切换账号 / 首启的重载入口：这里只做需要 UI 反馈的快速前置检查，
+     * 文件 IO、配置反序列化、装 Hook 等重活交给 {@link #runInit} 在后台线程跑，否则主线程会卡死。
      */
     private Boolean initHandler(Boolean force) {
         return initHandler(force, true);
     }
 
     /**
-     * @param exec 重载完成后是否**紧接着跑一轮**任务。
-     *             <p>true＝首启 / 切号 / 手动执行：重载完就该跑。
-     *             <p>false＝配置保存触发的重载：用户只是改了配置、并没有点"执行"，
-     *             不该被带着跑一轮；但仍要排上下一跳，否则重载清掉旧排期后链就断了。
+     * @param exec 重载后是否紧接着跑一轮。配置保存触发的重载传 false，但仍要排下一跳，
+     *             否则重载清掉旧排期后任务链就断了。
      */
     private Boolean initHandler(Boolean force, boolean exec) {
         if (service == null) {
@@ -766,31 +822,44 @@ public class ApplicationHook extends XposedModule {
         return runInit(force, exec);
     }
 
+    /** 令牌是 32 字节随机数的十六进制串；只有符合这个形状的旧文件内容才继承 */
+    private static final java.util.regex.Pattern HTTP_TOKEN_PATTERN =
+            java.util.regex.Pattern.compile("[0-9a-f]{64}");
+
+    /** 支付宝 userId 是纯数字；它会拼进 alipays:// 查询串，必须挡住其它字符 */
+    private static final java.util.regex.Pattern USER_ID_PATTERN =
+            java.util.regex.Pattern.compile("[0-9]{1,32}");
+
     /**
-     * 本地 HTTP 服务的鉴权令牌：首次生成后落盘复用
-     * （硬编码会随公开分发的 APK 泄漏，等于把通用 RPC 代理的钥匙一起发出去）。
-     * <p>读写失败返回空串——空令牌在 {@link BaseHandler#verifyToken} 里是拒绝，宁可服务不可用也不放行。
+     * 本地 HTTP 鉴权令牌：首次生成后落在宿主私有目录并复用。
+     * <p>读写失败返回空串：空令牌在 {@link BaseHandler#verifyToken} 里是拒绝，宁可服务不可用。
      */
     private static String resolveHttpToken() {
+        // 缓存命中直接返回：激活广播要在 Service.onCreate 里发，那时 runInit 还没跑，
+        // 不在这里先解析一次，回包就会缺令牌而被 App 当成伪造消息丢掉
+        String cached = httpToken;
+        if (cached != null) {
+            return cached;
+        }
         try {
+            FileUtil.initPrivateDirectory(context);
             java.io.File tokenFile = FileUtil.getHttpTokenFile();
-            String existing = FileUtil.readFromFile(tokenFile);
-            if (existing != null && !existing.trim().isEmpty()) {
-                return existing.trim();
+            String token = FileUtil.readFromFile(tokenFile).trim();
+            if (!isHttpToken(token)) {
+                // 升级后首次启动：把共享目录里的旧令牌搬进私有目录。值保持不变，
+                // PC 侧已经保存的令牌继续有效。
+                String legacy = FileUtil.readFromFile(FileUtil.getLegacyHttpTokenFile()).trim();
+                token = isHttpToken(legacy) ? legacy : randomHttpToken();
+                if (!FileUtil.write2File(token, tokenFile)) {
+                    Log.record("HTTP 鉴权令牌写入失败，本次不启动 HTTP 服务");
+                    return "";
+                }
+                Log.record("已生成 HTTP 鉴权令牌（存于私有目录 http_token.txt）");
             }
-            // 32 字节随机数的十六进制串
-            byte[] raw = new byte[32];
-            new java.security.SecureRandom().nextBytes(raw);
-            StringBuilder sb = new StringBuilder(raw.length * 2);
-            for (byte b : raw) {
-                sb.append(String.format("%02x", b));
-            }
-            String token = sb.toString();
-            if (FileUtil.write2File(token, tokenFile)) {
-                Log.record("已生成 HTTP 鉴权令牌（存于 http_token.txt）");
-                return token;
-            }
-            Log.record("HTTP 鉴权令牌写入失败，本次不启动 HTTP 服务");
+            syncLegacyHttpToken(token);
+            // 配对通道与闹钟 nonce 都要用同一个值：缓存下来，避免每次广播都读一次私有文件
+            httpToken = token;
+            return token;
         } catch (Throwable t) {
             Log.err(TAG, "resolveHttpToken err:", t);
         }
@@ -798,9 +867,50 @@ public class ApplicationHook extends XposedModule {
     }
 
     /**
-     * 真正执行重载，必须在非主线程调用。UI 相关（Toast / 权限提示）已内部切回主线程，
-     * 故整体跑在后台线程是安全的。
-     * synchronized 保证同一时刻只有一处重载，防止切号与首启 / 广播重启并发触发重复初始化。
+     * 共享目录里的令牌副本与「抓包记录」开关同生共死：开着写、关着删。
+     * <p>抓包开关本身就是 /debugHandler 的门禁，「PC 需要令牌」和「调试模式打开」是同一件事；
+     * 读路径只认私有目录，副本被改写不影响鉴权。
+     */
+    private static void syncLegacyHttpToken(String token) {
+        if (!Boolean.TRUE.equals(AppConfig.INSTANCE.getEnableDebugLog())) {
+            removeMirrorTokenFile();
+            return;
+        }
+        java.io.File mirrorFile = FileUtil.getLegacyHttpTokenFile();
+        if (!token.equals(FileUtil.readFromFile(mirrorFile).trim())) {
+            if (FileUtil.write2File(token, mirrorFile)) {
+                Log.record("调试模式已开启，令牌副本：" + mirrorFile);
+            } else {
+                Log.error("令牌副本写入失败：" + mirrorFile);
+            }
+        }
+    }
+
+    /** 删掉共享目录里的令牌副本：不存在是正常情况，删除失败记一条错误日志 */
+    private static void removeMirrorTokenFile() {
+        java.io.File mirrorFile = FileUtil.getLegacyHttpTokenFile();
+        if (mirrorFile.exists() && !mirrorFile.delete()) {
+            Log.error("共享目录令牌副本删除失败：" + mirrorFile);
+        }
+    }
+
+    private static boolean isHttpToken(String token) {
+        return token != null && HTTP_TOKEN_PATTERN.matcher(token).matches();
+    }
+
+    private static String randomHttpToken() {
+        byte[] raw = new byte[32];
+        new java.security.SecureRandom().nextBytes(raw);
+        StringBuilder sb = new StringBuilder(raw.length * 2);
+        for (byte b : raw) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 真正执行重载，必须在非主线程调用（UI 提示已内部切回主线程）。
+     * <p>synchronized 防止切号与首启 / 广播重启并发触发重复初始化。
      */
     private synchronized Boolean runInit(Boolean force, boolean exec) {
         destroyHandler(force);
@@ -890,10 +1000,8 @@ public class ApplicationHook extends XposedModule {
     }
 
     /**
-     * 安装抓包钩子（请求 + 返回各一个）。
-     * 开关统一为日志页的「抓包记录」({@code AppConfig.enableDebugLog})，全局生效；
-     * 老接口没有 RpcBridgeExtension.rpc / DefaultBridgeCallback.sendJSONResponse，故仍要求「使用新接口」开着。
-     * 重复调用不会叠加 hook。
+     * 安装抓包钩子（请求 + 返回各一个），开关为「抓包记录」。
+     * <p>老接口没有 RpcBridgeExtension.rpc，故要求「使用新接口」开着；重复调用不叠加 hook。
      */
     private static synchronized void installRpcRecordHook() {
         if (!AppConfig.INSTANCE.getEnableDebugLog()) {
@@ -1153,10 +1261,9 @@ public class ApplicationHook extends XposedModule {
     }
 
     /**
-     * 替换 RPC 实现（离线模式、诊断、单元测试注入替身用）；传 null 表示回到默认的支付宝 RPC 桥。
-     * <p>不注入时行为与原先完全一致：一律转发给 startHandler 里创建的 {@code rpcBridge}。
-     * <p>注入替身后，各 RpcCall 构造出的请求体（method + data）会原样交给替身，
-     * 因此可以在不连真机的情况下检查请求体本身是否正确。
+     * 替换 RPC 实现（离线模式、诊断、单元测试注入替身）；传 null 回到默认的支付宝 RPC 桥。
+     * <p>注入替身后，RpcCall 构造的请求体（method + data）原样交给替身，
+     * 因此不连真机也能检查请求体。
      */
     public static void setRpcBridge(RpcBridge bridge) {
         rpcBridge = bridge;
@@ -1210,22 +1317,268 @@ public class ApplicationHook extends XposedModule {
         return rpcBridge.requestObject(method, data, relation, tryCount, retryInterval);
     }
 
-    public static void reLoginByBroadcast() {
+    /**
+     * 在本进程内重载 hook，效果等同 restart 广播；同进程自救绕广播只会多依赖一次分发，
+     * 而服务刚被销毁时那恰恰是最不可靠的一环。
+     */
+    private void restartSelf(boolean exec) {
+        new Thread(() -> {
+            try {
+                initHandler(true, exec);
+            } catch (Throwable th) {
+                Log.printStackTrace(TAG, th);
+            }
+        }, "Sesame-Restart").start();
+    }
+
+    /** 定时唤醒的 Intent：action 独立于业务广播，并带上由令牌派生的 nonce */
+    private static Intent alarmIntent() {
+        Intent intent = new Intent(ACTION_ALARM_EXECUTE);
+        String nonce = alarmNonce();
+        if (nonce != null) {
+            intent.putExtra("nonce", nonce);
+        }
+        return intent;
+    }
+
+    /**
+     * 闹钟口令：由稳定令牌派生，令牌不变则口令不变，PendingIntent 里的快照始终有效。
+     * <p>派生而不是存原文：这个 extra 会跟着 PendingIntent 落进系统闹钟，不该放能直接调 HTTP 的凭据。
+     */
+    private static String alarmNonce() {
+        String token = httpToken;
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
         try {
-            context.sendBroadcast(new Intent("com.eg.android.AlipayGphone.sesame.reLogin"));
-        } catch (Throwable th) {
-            Log.err(TAG, "sesame sendBroadcast reLogin err:", th);
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest((token + ":sesame-alarm").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(32);
+            for (int i = 0; i < 16; i++) {
+                sb.append(String.format("%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            Log.err(TAG, "alarmNonce err:", t);
+            return null;
         }
     }
 
-    public static void restartByBroadcast() {
+    private static boolean verifyAlarmNonce(Intent intent) {
+        String expected = alarmNonce();
+        String given = intent == null ? null : intent.getStringExtra("nonce");
+        if (expected == null || given == null) {
+            return false;
+        }
+        return java.security.MessageDigest.isEqual(
+                given.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                expected.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * control 通道鉴权：令牌常数时间比较 + 要求定向投递。
+     * <p>{@code getPackage()} 只表示「发送方是否定向」，挡不住伪造；真正拦人的是令牌比较，
+     * 定向只决定令牌会不会外泄。
+     */
+    private static boolean verifyControl(Intent intent) {
+        if (intent == null || !HOST_PACKAGE_NAME.equals(intent.getPackage())) {
+            return false;
+        }
+        String token = httpToken;
+        String given = intent.getStringExtra("token");
+        if (token == null || given == null) {
+            return false;
+        }
+        return java.security.MessageDigest.isEqual(
+                given.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                token.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** 各 op 的最小间隔：探活快，动作为慢，execute 最慢 */
+    private static long controlMinInterval(String op) {
+        if (op == null) {
+            return CONTROL_MIN_INTERVAL_RESTART;
+        }
+        switch (op) {
+            case "status":
+                return CONTROL_MIN_INTERVAL_STATUS;
+            case "execute":
+                return CONTROL_MIN_INTERVAL_EXECUTE;
+            case "openProfile":
+                return CONTROL_MIN_INTERVAL_OPEN_PROFILE;
+            case "restart":
+            case "reloadConfig":
+            default:
+                return CONTROL_MIN_INTERVAL_RESTART;
+        }
+    }
+
+    /** 频控：同一 op 两次请求至少间隔各自窗口，挡住令牌泄露后的批量刷；计时按 op 独立 */
+    private static boolean controlRateLimited(String op) {
+        String key = op == null ? "" : op;
+        long min = controlMinInterval(key);
+        java.util.concurrent.atomic.AtomicLong slot = lastControlAt.computeIfAbsent(
+                key, k -> new java.util.concurrent.atomic.AtomicLong(0));
+        long now = System.currentTimeMillis();
+        while (true) {
+            long last = slot.get();
+            if (last != 0 && now - last < min) {
+                return true;
+            }
+            if (slot.compareAndSet(last, now)) {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * 受控通道统一入口：广播（{@code sesame.control}）与 HTTP 都从这里进，保证语义与副作用一致。
+     * @return null 表示已受理，否则是拒绝原因
+     */
+    public static String dispatchControl(String op, String userId, String group, String data, boolean exec) {
+        if (op == null || !CONTROL_OPS.contains(op)) {
+            return "unknown op";
+        }
+        ApplicationHook hook = self;
+        if (hook == null) {
+            return "hook not loaded";
+        }
+        switch (op) {
+            case "restart":
+                // 带 userId 时只在切到该账号后重载，避免旧账号的保存把新账号的进程带跑一遍
+                if (StringUtil.isEmpty(userId) || Objects.equals(UserIdMap.getCurrentUid(), userId)) {
+                    hook.restartSelf(exec);
+                }
+                return null;
+            case "reloadConfig":
+                reloadAppConfig();
+                return null;
+            case "execute":
+                // 与 restart 同理：带 userId 时只在切到该账号后才跑，避免切号后旧账号的请求跑新账号任务
+                if (StringUtil.isEmpty(userId) || Objects.equals(UserIdMap.getCurrentUid(), userId)) {
+                    hook.executeGroup(group);
+                }
+                return null;
+            case "status":
+                hook.replyStatus();
+                return null;
+            case "openProfile":
+                openFriendProfile(context, userId);
+                return null;
+            case "forestQuery":
+                // group 承载 method：只接受上面那张表里的值，越界一律拒绝
+                if (group == null || !FOREST_QUERY_METHODS.contains(group)) {
+                    return "unknown method";
+                }
+                TestRpc.start("antForest", group, null);
+                return null;
+            case "walkPath":
+                if (group == null || !WALK_PATH_METHODS.contains(group)) {
+                    return "unknown method";
+                }
+                if ("clearCustomWalkPathIdQueue".equals(group)) {
+                    TestRpc.start("clearCustomWalkPathIdQueue", null, "setCustomWalkPathIdQueue");
+                } else if ("addCustomWalkPathIdQueue".equals(group)) {
+                    if (StringUtil.isEmpty(data)) {
+                        return "missing data";
+                    }
+                    TestRpc.start("addCustomWalkPathIdQueue", data, "setCustomWalkPathIdQueue");
+                } else {
+                    if (StringUtil.isEmpty(data)) {
+                        return "missing data";
+                    }
+                    TestRpc.start("addCustomWalkPathId", data, "setCustomWalkPathIdList");
+                }
+                return null;
+            default:
+                return "unknown op";
+        }
+    }
+
+    /** UI 侧改完共享配置后通知本进程重读：只重读 AppConfig，不重挂 Model hook */
+    private static void reloadAppConfig() {
         try {
-            Intent intent = new Intent("com.eg.android.AlipayGphone.sesame.restart");
-            // 宿主前台服务被销毁后的自救：重载完要紧接着跑一轮，否则要白等一个查询间隔
-            intent.putExtra("exec", true);
-            context.sendBroadcast(intent);
+            AppConfig.load();
+            // 「抓包记录」开关即时装卸钩子（原来只在 initHandler 判定，改了必须重启进程才生效）
+            if (AppConfig.INSTANCE.getEnableDebugLog()) {
+                installRpcRecordHook();
+                MiniProgramHook.install(classLoader, processName);
+                // 调试模式一开就把令牌镜像到共享目录，PC 侧立刻可读，不必等进程重启或下次解析令牌
+                String mirrorToken = resolveHttpToken();
+                if (!mirrorToken.isEmpty()) {
+                    syncLegacyHttpToken(mirrorToken);
+                }
+            } else {
+                uninstallRpcRecordHook();
+                MiniProgramHook.uninstall();
+            }
+            // 令牌副本跟随抓包开关：关掉调试就立刻删副本，不留到进程重启
+            if (!Boolean.TRUE.equals(AppConfig.INSTANCE.getEnableDebugLog())) {
+                removeMirrorTokenFile();
+            }
+            Log.i(TAG, "reload AppConfig from UI");
         } catch (Throwable th) {
-            Log.err(TAG, "sesame sendBroadcast restart err:", th);
+            Log.err(TAG, "sesame reloadConfig err:", th);
+        }
+    }
+
+    /** 跑一轮任务；执行前必须重载配置，否则「刚开启的模块点了执行却不跑」 */
+    private void executeGroup(String groupCode) {
+        new Thread(() -> {
+            try {
+                ConfigV2.load(UserIdMap.getCurrentUid());
+                if (StringUtil.isEmpty(groupCode)) {
+                    initHandler(false);
+                } else if (ModelGroup.BASE == ModelGroup.getByCode(groupCode)) {
+                    ModelTask.stopAllTask();
+                    // 同分组分支：先打提示，避免被森林的同步执行挡在后面
+                    Log.record("开始执行全部任务");
+                    ModelTask.startAllTask(false);
+                } else {
+                    ModelTask.stopAllTask();
+                    // 先打"开始"再启动：森林 isSync=true 会同步阻塞到跑完，放在后面会晚很久才出现
+                    Log.record("开始执行分组【" + ModelGroup.getName(groupCode) + "】任务");
+                    int count = ModelTask.startGroupTask(groupCode);
+                    if (count == 0) {
+                        Log.record("分组【" + ModelGroup.getName(groupCode) + "】无可执行任务");
+                    }
+                }
+            } catch (Throwable th) {
+                Log.printStackTrace(TAG, th);
+            }
+        }, "Sesame-Execute").start();
+    }
+
+    /** 回一条「宿主在线」给模块 App：必须定向，否则第三方伪造也能让 App 误判宿主活着 */
+    private void replyStatus() {
+        sendStatusBroadcast(context);
+    }
+
+    /**
+     * 激活/探活的统一回包：定向到模块包 + 带令牌，App 侧据此确认这是宿主发的而不是第三方伪造的。
+     * <p>静态是因为 onModuleLoaded 早于 Service.onCreate，那时还拿不到当前实例上的 {@code context}。
+     */
+    private static void sendStatusBroadcast(Context ctx) {
+        if (ctx == null) {
+            return;
+        }
+        try {
+            // 令牌可能尚未解析（Service.onCreate 早于 runInit），先取一次，否则回包缺令牌会被 App 丢掉
+            if (httpToken == null) {
+                resolveHttpToken();
+            }
+            String token = httpToken;
+            // 空令牌的回包会被 App 当成伪造消息丢掉，宁可不发也要留一条日志
+            if (token == null || token.isEmpty()) {
+                Log.record("状态回包未发送#令牌不可用，App 会显示未激活");
+                return;
+            }
+            Intent reply = new Intent(ACTION_STATUS_REPLY);
+            reply.setPackage(MODULE_PACKAGE_NAME);
+            reply.putExtra("token", token);
+            ctx.sendBroadcast(reply);
+        } catch (Throwable th) {
+            Log.err(TAG, "sesame sendBroadcast status err:", th);
         }
     }
 
@@ -1299,133 +1652,97 @@ public class ApplicationHook extends XposedModule {
     private class AlipayBroadcastReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            // Receiver 为运行时注册，Android 13+ 必须 RECEIVER_EXPORTED（模块 App 与支付宝是不同
-            // UID，跨进程送达只能靠导出），所以"任意应用都能触发 restart/reLogin"只能在此按 uid 拦
-            if (!isTrustedBroadcastSender(context, this)) {
-                Log.record("广播来源不在白名单，已忽略#" + action);
+            String action = intent == null ? null : intent.getAction();
+            if (action == null) {
                 return;
             }
-            Log.i("sesame broadcast action:" + action + " intent:" + intent);
-            if (action != null) {
-                switch (action) {
-                    case "com.eg.android.AlipayGphone.sesame.restart":
-                        String userId = intent.getStringExtra("userId");
-                        // 默认不执行：这条广播主要来自配置保存（字段页退出、需重挂 hook 的开关），
-                        // 用户并没点"执行"；宿主前台服务被销毁的自救路径会显式带 exec=true
-                        boolean execAfterRestart = intent.getBooleanExtra("exec", false);
-                        if (StringUtil.isEmpty(userId) || Objects.equals(UserIdMap.getCurrentUid(), userId)) {
-                            BroadcastReceiver.PendingResult r = goAsync();
-                            new Thread(() -> {
-                                try {
-                                    initHandler(true, execAfterRestart);
-                                } catch (Throwable th) {
-                                    Log.printStackTrace(TAG, th);
-                                }
-                                r.finish();
-                            }, "Sesame-Restart").start();
-                        }
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.execute":
-                        // 配置页"执行"按钮会带 group（ModelGroup 的 code）：BASE＝全部任务，
-                        // 其余只跑该分组的任务；不带 group 时保持原行为（整轮执行）。
-                        String groupCode = intent.getStringExtra("group");
-                        BroadcastReceiver.PendingResult r2 = goAsync();
-                        new Thread(() -> {
-                            try {
-                                // 「执行」前必须重载配置：模块开关的 isEnable() 读的是进程内存里的
-                                // enableField，而配置刚在 UI 侧改过（保存触发的 restart 广播可能还没到）。
-                                // 不重载会出现「刚开启的模块点了执行却不跑」。
-                                ConfigV2.load(UserIdMap.getCurrentUid());
-                                if (StringUtil.isEmpty(groupCode)) {
-                                    initHandler(false);
-                                } else if (ModelGroup.BASE == ModelGroup.getByCode(groupCode)) {
-                                    ModelTask.stopAllTask();
-                                    // 同分组分支：先打提示，避免被森林的同步执行挡在后面
-                                    Log.record("开始执行全部任务");
-                                    ModelTask.startAllTask(false);
-                                } else {
-                                    ModelTask.stopAllTask();
-                                    // 先打"开始"再启动：森林 isSync=true 会同步阻塞到跑完，
-                                    // 若把提示放在 startGroupTask 之后，它会排在森林的执行日志之后（实测晚 20 秒）
-                                    Log.record("开始执行分组【" + ModelGroup.getName(groupCode) + "】任务");
-                                    int count = ModelTask.startGroupTask(groupCode);
-                                    if (count == 0) {
-                                        Log.record("分组【" + ModelGroup.getName(groupCode) + "】无可执行任务");
-                                    }
-                                }
-                            } catch (Throwable th) {
-                                Log.printStackTrace(TAG, th);
-                            }
-                            r2.finish();
-                        }, "Sesame-Execute").start();
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.reLogin":
-                        reLogin();
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.status":
-                        try {
-                            Log.i(TAG, "broadcast: recv query, send active status");
-                            context.sendBroadcast(new Intent("io.github.aw1y2z.sesame.status"));
-                        } catch (Throwable th) {
-                            Log.err(TAG, "sesame sendBroadcast status err:", th);
-                        }
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.rpctest":
-                        try {
-                            String method = intent.getStringExtra("method");
-                            String data = intent.getStringExtra("data");
-                            String type = intent.getStringExtra("type");
-                            TestRpc.start(method, data, type);
-                        } catch (Throwable th) {
-                            Log.err(TAG, "sesame rpctest err:", th);
-                        }
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.openProfile":
-                        // 好友统计页面点某一行时触发：在宿主进程内打开该好友的支付宝主页
-                        try {
-                            openFriendProfile(context, intent.getStringExtra("userId"));
-                        } catch (Throwable th) {
-                            Log.err(TAG, "sesame openProfile err:", th);
-                        }
-                        break;
-                    case "com.eg.android.AlipayGphone.sesame.reloadConfig":
-                        // UI 侧修改日志开关等共享配置后通知本进程重载,使开关即时生效
-                        try {
-                            AppConfig.load();
-                            // 「抓包记录」开关即时装卸钩子（原来只在 initHandler 判定，改了必须重启进程才生效）
-                            if (AppConfig.INSTANCE.getEnableDebugLog()) {
-                                installRpcRecordHook();
-                                MiniProgramHook.install(classLoader, processName);
-                            } else {
-                                uninstallRpcRecordHook();
-                                MiniProgramHook.uninstall();
-                            }
-                            Log.i(TAG, "reload AppConfig from UI");
-                        } catch (Throwable th) {
-                            Log.err(TAG, "sesame reloadConfig err:", th);
-                        }
-                        break;
-                }
+            Log.i("sesame broadcast action:" + action);
+            switch (action) {
+                case ACTION_PAIR_REQUEST:
+                    handlePairRequest(context, intent);
+                    return;
+                case ACTION_ALARM_EXECUTE:
+                    // 系统闹钟由 PendingIntent 代发，拿不到发送方 uid，只能靠 extra 里的 nonce 认
+                    if (!verifyAlarmNonce(intent)) {
+                        Log.record("定时唤醒校验失败，已忽略");
+                        return;
+                    }
+                    executeGroup(null);
+                    return;
+                case ACTION_CONTROL:
+                    // uid 白名单在 API 34 以下取不到发送方，只能当补充；令牌才是这条通道的门
+                    if (!isTrustedBroadcastSender(context, this)) {
+                        Log.record("受控通道来源不可信，已忽略");
+                        return;
+                    }
+                    if (!verifyControl(intent)) {
+                        Log.record("受控通道令牌校验失败，已忽略");
+                        return;
+                    }
+                    String op = intent.getStringExtra("op");
+                    // 每个 op 各有窗口（status 2s / restart 10s / execute 60s / openProfile 5s），
+                    // 探活不会挤掉动作，动作之间也互不影响
+                    if (controlRateLimited(op)) {
+                        Log.record("受控通道触发过于频繁，已忽略#" + op);
+                        return;
+                    }
+                    String rejected = dispatchControl(op,
+                            intent.getStringExtra("userId"),
+                            intent.getStringExtra("group"),
+                            intent.getStringExtra("data"),
+                            intent.getBooleanExtra("exec", false));
+                    if (rejected != null) {
+                        Log.record("受控通道拒绝#" + op + ":" + rejected);
+                    }
+                    return;
+                default:
+                    Log.i("sesame broadcast ignored action:" + action);
             }
         }
     }
 
     /**
-     * 校验广播发送方是否可信。
-     * <p>
-     * 该 Receiver 由运行时注册，Android 13 起必须带 {@code RECEIVER_EXPORTED}：模块 App
-     * （{@code io.github.aw1y2z.sesame}）与支付宝是两个不同 UID，跨进程送达只能靠导出，
-     * 所以"任意应用都能触发 restart / reLogin"只能在收到广播后按发送方 uid 拦。
-     * <p>
-     * 白名单：本进程（支付宝自己发的，含由系统代发的 PendingIntent）、模块 App、adb shell（调试用）。
-     * <p>
-     * 发送方 uid 取自 {@code BroadcastReceiver.getSentFromUid()}——该 API 自 Android 14（API 34）起
-     * 提供。低版本无从判定，直接放行以免误伤；Android 14+ 上若返回 {@code Process.INVALID_UID}
-     * （广播由系统代发时取不到来源）同样放行并记日志，因为闹钟触发的定时执行走的就是这条路径，
-     * 收紧会让定时任务失效。
-     *
-     * @return true 表示可信，继续处理
+     * 配对：App 发 challenge，宿主把当前令牌定向回给 App 包。
+     * <p>故意不校验令牌——App 还没有令牌，这正是它拿令牌的途径。安全性来自回包定向
+     * 与令牌只在宿主私有目录，刷屏由 60 秒频控兜住。
+     */
+    private void handlePairRequest(Context ctx, Intent intent) {
+        try {
+            long now = System.currentTimeMillis();
+            long last = lastPairAt.get();
+            if (last != 0 && now - last < PAIR_MIN_INTERVAL) {
+                return;
+            }
+            lastPairAt.set(now);
+            String challenge = intent.getStringExtra("challenge");
+            if (StringUtil.isEmpty(challenge)) {
+                return;
+            }
+            String token = httpToken;
+            if (token == null) {
+                token = resolveHttpToken();
+            }
+            if (StringUtil.isEmpty(token)) {
+                Log.record("配对失败：本进程尚无可用令牌");
+                return;
+            }
+            Intent result = new Intent(ACTION_PAIR_RESULT);
+            result.setPackage(MODULE_PACKAGE_NAME);
+            result.putExtra("token", token);
+            result.putExtra("challenge", challenge);
+            ctx.sendBroadcast(result);
+            Log.record("已响应对口请求");
+        } catch (Throwable th) {
+            Log.err(TAG, "handlePairRequest err:", th);
+        }
+    }
+
+    /**
+     * 校验广播发送方是否可信。Receiver 必须导出（模块 App 与支付宝不同 UID），
+     * 所以「任意应用都能触发 restart」只能在这里按发送方 uid 拦。
+     * <p>白名单：本进程、模块 App、adb shell。uid 取自 Android 14+ 的 getSentFromUid()，
+     * 低版本与 {@code Process.INVALID_UID}（系统代发，如闹钟触发的定时执行）一律放行，否则定时任务失效。
+     * @return true 表示可信
      */
     private static boolean isTrustedBroadcastSender(Context context, BroadcastReceiver receiver) {
         try {
@@ -1474,14 +1791,13 @@ public class ApplicationHook extends XposedModule {
                 }
             }
 
+            // 只留三条：配对（无令牌可用，回包定向）、闹钟（nonce 校验）、受控通道（令牌 + 定向）。
+            // 原来的 restart/execute/reLogin/status/rpctest/reloadConfig/openProfile 七条全部并入
+            // control，任意应用注册同名 action 也拿不到令牌，触发不了任何动作。
             IntentFilter intentFilter = new IntentFilter();
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.restart");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.execute");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.reLogin");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.status");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.rpctest");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.reloadConfig");
-            intentFilter.addAction("com.eg.android.AlipayGphone.sesame.openProfile");
+            intentFilter.addAction(ACTION_PAIR_REQUEST);
+            intentFilter.addAction(ACTION_ALARM_EXECUTE);
+            intentFilter.addAction(ACTION_CONTROL);
 
             broadcastReceiver = new AlipayBroadcastReceiver();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1498,16 +1814,21 @@ public class ApplicationHook extends XposedModule {
 
     /**
      * 在宿主（支付宝）进程内打开指定好友的个人主页。
-     * <p>
-     * 必须由本进程发起：模块 App 直接 startActivity 一个 {@code alipays://} scheme 时，调用方不是
-     * 支付宝自身，会被 {@code BlackProductSafeGuardUtil.appSchemeCheck} 判为不可信而拦掉（实机验证
-     * 报 {@code proceed error}，界面停在首页）。在宿主进程内发起则等同于支付宝自己跳转。
-     *
-     * @param userId 好友的支付宝 userId（好友统计里的 id）
+     * <p>必须由本进程发起：模块 App 发的 {@code alipays://} 调用方不是支付宝自身，
+     * 会被 {@code appSchemeCheck} 判为不可信而拦掉。
+     * @param userId 好友的支付宝 userId
      */
     private static void openFriendProfile(Context context, String userId) {
+        // 兜底广播进来时标记可能还留着（resume 那条路没走通），先清掉：
+        // 否则下一次任意页面 resume 会把同一个好友再弹一次。
+        new java.io.File(FileUtil.MAIN_DIRECTORY_FILE, PENDING_PROFILE_FILE).delete();
         if (StringUtil.isEmpty(userId)) {
             Log.record("打开好友主页失败#缺少userId");
+            return;
+        }
+        // userId 直接拼进 alipays:// 的查询串，放任任意字符等于把拼串权交给调用方
+        if (!USER_ID_PATTERN.matcher(userId).matches()) {
+            Log.record("打开好友主页失败#userId 格式非法");
             return;
         }
         // 模块 App 冷启动时会补发几次广播，这里对同一好友做去重，避免重复弹页
@@ -1519,22 +1840,127 @@ public class ApplicationHook extends XposedModule {
         lastProfileTime = now;
         // 标记本次跳转：紧随其后创建的容器页就是好友页，需要接管并关掉上一个好友页
         profileOpenExpectAt = now;
-        // 好友主页是 appId=20002167 的小程序页 profilePage，路由写法与通讯录里「聊天火花」跳转
-        // （startApp + appId + pageName + userId）一致，实机验证能打开并请求该好友的动态。
-        String uri = "alipays://platformapi/startApp"
+        // 好友主页是 appId=20002167 的小程序页 profilePage。
+        // 走 alipays:// scheme 会多起 SchemeLauncherActivity / LauncherActivity 两个空窗口
+        // （小窗、分屏下每个 Activity 都是独立窗口），故优先在进程内直接启动。
+        if (startProfileInProcess(userId)) {
+            // 启动入口没有回执：超时未等到容器页就换下一个入口，都失败才退回 scheme
+            android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            handler.postDelayed(() -> {
+                if (profileOpenExpectAt == 0 || !userId.equals(lastProfileUserId)) {
+                    return;
+                }
+                if (startProfileEventInProcess(userId)) {
+                    handler.postDelayed(() -> {
+                        if (profileOpenExpectAt != 0 && userId.equals(lastProfileUserId)) {
+                            startProfileScheme(context, userId);
+                        }
+                    }, 900);
+                    return;
+                }
+                startProfileScheme(context, userId);
+            }, 800);
+            return;
+        }
+        startProfileScheme(context, userId);
+    }
+
+    /** 走 scheme 跳好友主页，作为进程内启动失败时的退路 */
+    private static boolean startProfileScheme(Context context, String userId) {
+        try {
+            context.startActivity(buildProfileSchemeIntent(userId));
+            return true;
+        } catch (Throwable th) {
+            profileOpenExpectAt = 0;
+            Log.err(TAG, "openFriendProfile fallback err#userId=" + userId, th);
+            Log.record("打开好友主页失败#userId=" + userId);
+            return false;
+        }
+    }
+
+    private static String buildProfileUri(String userId) {
+        return "alipays://platformapi/startApp"
                 + "?appId=" + PROFILE_APP_ID
                 + "&pageName=profilePage"
                 + "&userId=" + userId;
+    }
+
+    /** 走 scheme 的跳转 intent，作为进程内 startApp 失败时的退路 */
+    private static Intent buildProfileSchemeIntent(String userId) {
+        Intent it = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(buildProfileUri(userId)));
+        // NEW_TASK + 调用方上下文：支付宝此刻已经在前台，这个 flags 只会复用现有任务
+        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return it;
+    }
+
+    /**
+     * 在支付宝进程内直接启动好友主页小程序，返回是否成功发起。
+     * <p>
+     * 签名是五参数 {@code startApp(from, appId, Bundle params, Bundle extra, activity)}，
+     * 启动参数全在第三个 Bundle 里；当成 JSON 字符串传会打开不相干的页面。
+     */
+    private static boolean startProfileInProcess(String userId) {
+        return invokeStartMethod("startApp", userId);
+    }
+
+
+    /** 备选入口：scheme 路径最后拉起容器的是 startAppEvent，签名与参数同上 */
+    private static boolean startProfileEventInProcess(String userId) {
+        return invokeStartMethod("startAppEvent", userId);
+    }
+
+    /**
+     * 反射调用框架启动入口。只认「五参数 + 第 2 个是 String(appId) + 第 3 个是 Bundle」的重载：
+     * 同名重载很多，只按名字匹配会打错。用 {@code invoke} 而非 {@code XHelpers.callMethod}，
+     * 参数为 null 时也能按声明类型匹配。
+     */
+    private static boolean invokeStartMethod(String methodName, String userId) {
         try {
-            Intent it = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri));
-            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(it);
-            Log.i(TAG, "open friend profile: " + userId);
+            Object microApp = getMicroApplicationContext();
+            if (microApp == null) {
+                return false;
+            }
+            android.os.Bundle params = buildProfileStartBundle(userId);
+            for (Class<?> clazz = microApp.getClass(); clazz != null && clazz != Object.class; clazz = clazz.getSuperclass()) {
+                for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
+                    if (!methodName.equals(method.getName()) || method.getParameterCount() != 5) {
+                        continue;
+                    }
+                    Class<?>[] types = method.getParameterTypes();
+                    if (types[2] != android.os.Bundle.class || !types[1].isAssignableFrom(String.class)) {
+                        continue;
+                    }
+                    try {
+                        method.setAccessible(true);
+                        method.invoke(microApp, null, PROFILE_APP_ID, params, null, null);
+                        return true;
+                    } catch (Throwable th) {
+                        Log.err(TAG, methodName + " invoke err#userId=" + userId, th);
+                        return false;
+                    }
+                }
+            }
+            Log.i(TAG, "no usable " + methodName + " method on " + microApp.getClass().getName());
+            return false;
         } catch (Throwable th) {
-            profileOpenExpectAt = 0;
-            Log.err(TAG, "openFriendProfile err#userId=" + userId, th);
-            Log.record("打开好友主页失败#userId=" + userId);
+            Log.err(TAG, "invokeStartMethod err#" + methodName, th);
+            return false;
         }
+    }
+
+    /** 好友主页的启动参数，key 与 scheme 路径里的 Bundle 一致 */
+    private static android.os.Bundle buildProfileStartBundle(String userId) {
+        android.os.Bundle params = new android.os.Bundle();
+        params.putString("appId", PROFILE_APP_ID);
+        params.putString("pageName", "profilePage");
+        params.putString("userId", userId);
+        params.putBoolean("recordGestureTime", true);
+        params.putBoolean("startFromExternal", false);
+        params.putString("ap_framework_sceneId", PROFILE_APP_ID);
+        params.putString("ap_framework_scheme", buildProfileUri(userId));
+        params.putString("bizLogParam",
+                "{\"coldStartup\":false,\"fromScheme\":true,\"showLoginAndGesture\":false}");
+        return params;
     }
 
     /**
@@ -1549,7 +1975,6 @@ public class ApplicationHook extends XposedModule {
         Activity last = lastProfileActivity.get();
         if (last != null && last != activity && !last.isFinishing() && !last.isDestroyed()) {
             last.finish();
-            Log.i(TAG, "finish previous profile page");
         }
         lastProfileActivity = new WeakReference<>(activity);
     }
@@ -1576,11 +2001,9 @@ public class ApplicationHook extends XposedModule {
     }
 
     /**
-     * 消费模块 App 写在共享目录里的「待打开好友」标记。
-     * <p>
-     * 模块 App 点击好友行时先把 userId 落盘再拉起支付宝，宿主进程冷启动后一进
-     * {@code LauncherActivity.onResume} 就能直接跳主页，不必等广播，从而少一次「先停在首页」的闪烁。
-     * 标记只消费一次，且超过 {@link #PENDING_PROFILE_TTL} 视为过期。
+     * 消费「待打开好友」标记：模块 App 点击好友行时先落盘再拉起支付宝，宿主冷启动后
+     * 一进 {@code LauncherActivity.onResume} 就能直接跳主页，省掉「先停在首页」的闪烁。
+     * <p>标记只消费一次，超过 {@link #PENDING_PROFILE_TTL} 视为过期。
      */
     private static void checkPendingProfile(Context context) {
         try {
@@ -1603,12 +2026,9 @@ public class ApplicationHook extends XposedModule {
                 } catch (NumberFormatException ignored) {
                 }
             }
-            long age = System.currentTimeMillis() - ts;
-            if (ts > 0 && age > PENDING_PROFILE_TTL) {
-                Log.i(TAG, "pending profile expired: " + age + "ms");
+            if (ts > 0 && System.currentTimeMillis() - ts > PENDING_PROFILE_TTL) {
                 return;
             }
-            Log.i(TAG, "consume pending profile: " + userId);
             openFriendProfile(context, userId);
         } catch (Throwable th) {
             Log.err(TAG, "checkPendingProfile err:", th);
@@ -1624,11 +2044,7 @@ public class ApplicationHook extends XposedModule {
         }
     }
 
-    /**
-     * 检查目标应用版本是否需要启用SimplePageManager功能
-     *
-     * @return true表示版本低于等于10.6.58.99999，需要启用；false表示不需要
-     */
+    /** @return 支付宝版本低于等于 10.6.58.99999 时需启用 SimplePageManager */
     private boolean shouldEnableSimplePageManager() {
         if (alipayVersion.toString().isEmpty()) {
             return false;
