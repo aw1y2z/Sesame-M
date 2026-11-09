@@ -20,6 +20,9 @@ public class FriendWatch extends IdAndName {
 
     private static JSONObject joFriendWatch;
 
+    /** 本次加载是否解析失败：内存是空对象时不得落盘，否则历史统计被抹成 {} */
+    private static volatile boolean loadFailed;
+
     private String startTime;
 
     private int allGet;
@@ -90,6 +93,11 @@ public class FriendWatch extends IdAndName {
     }
 
     public static synchronized void save() {
+        if (loadFailed) {
+            // 内存是空对象：写盘会把历史统计抹成 {}
+            Log.debug(TAG + ", 好友统计加载失败，跳过保存");
+            return;
+        }
         try {
             FileUtil.write2File(joFriendWatch.toString(), FileUtil.getFriendWatchFile());
         } catch (Exception e){
@@ -98,6 +106,9 @@ public class FriendWatch extends IdAndName {
     }
 
     public static void updateDay() {
+        if (loadFailed) {
+            return;
+        }
         if (!needUpdateAll(FileUtil.getFriendWatchFile().lastModified())) {
             return;
         }
@@ -123,6 +134,7 @@ public class FriendWatch extends IdAndName {
     }
 
     public static synchronized Boolean load() {
+        loadFailed = false;
         try {
             String strFriendWatch = FileUtil.readFromFile(FileUtil.getFriendWatchFile());
             if (!strFriendWatch.isEmpty()) {
@@ -137,6 +149,9 @@ public class FriendWatch extends IdAndName {
             return true;
         } catch (JSONException e) {
             Log.printStackTrace(e);
+            // 不写盘：空对象落盘就是历史统计全丢
+            loadFailed = true;
+            Log.record("好友统计解析失败，本次使用空统计（不写盘，原文件保留）");
             joFriendWatch = new JSONObject();
         }
         return false;
@@ -200,12 +215,8 @@ public class FriendWatch extends IdAndName {
                 list.add(friendWatch);
             }
         } catch (Throwable t) {
+            // 只跳过本次读取：覆写成 {} 会把历史统计抹掉
             Log.err(TAG, "FriendWatch getList: ", t);
-            try {
-                FileUtil.write2File(new JSONObject().toString(), FileUtil.getFriendWatchFile());
-            } catch (Exception e) {
-                Log.printStackTrace(e);
-            }
         }
         return list;
     }

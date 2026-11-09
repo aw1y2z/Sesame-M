@@ -29,6 +29,9 @@ public class Status {
      */
     private static volatile boolean saveFailureNotified = false;
 
+    /** 本次加载是否解析失败：内存只剩默认值时不得落盘，否则当天标记被整份清空 */
+    private static volatile boolean loadFailed = false;
+
     /**
      * 内存里这份状态属于哪个 uid（静态字段不进 Jackson、不落盘）。
      * <p>启动早期 uid 可能尚未就绪，此时 load() 读到的不是本账号的文件；若据此落盘，
@@ -745,6 +748,7 @@ public class Status {
     }
 
     public static synchronized Status load() {
+        loadFailed = false;
         String currentUid = UserIdMap.getCurrentUid();
         try {
             if (StringUtil.isEmpty(currentUid)) {
@@ -777,10 +781,11 @@ public class Status {
         }
         catch (Throwable t) {
             Log.printStackTrace(TAG, t);
-            Log.i(TAG, "状态文件格式有误，已重置");
+            // 只回落内存默认值、不写盘：写盘会把当天标记整份清空
+            loadFailed = true;
+            Log.record("状态文件解析失败，本次使用默认值（不写盘，原文件保留）");
             try {
                 JsonUtil.copyMapper().updateValue(INSTANCE, new Status());
-                FileUtil.write2File(JsonUtil.toFormatJsonString(INSTANCE), FileUtil.getStatusFile(currentUid));
             }
             catch (JsonMappingException e) {
                 Log.printStackTrace(TAG, e);
@@ -814,6 +819,11 @@ public class Status {
         // 目标文件按「内存状态的归属」取，而不是再读一次当前 uid：切号可能正好落在两步之间，
         // 拿新 uid 去写旧状态就是「把 A 账号的标记写进 B 账号的文件」。
         String currentUid = ensureLoadedForCurrentUid();
+        if (loadFailed) {
+            // 内存只是默认值：写盘会把当天标记清空
+            Log.debug(TAG + ", 状态文件加载失败，跳过保存");
+            return;
+        }
         if (updateDay(nowCalendar)) {
             Log.system(TAG, "重置 status.json");
         }
