@@ -668,6 +668,15 @@ fun LogsTab(activity: MiuixMainActivity) {
             debug = it
             AppConfig.INSTANCE.enableDebugLog = it
             AppConfig.save()
+            if (it) {
+                // 副本由宿主写入，未配对时只能等它下次加载
+                if (!HostBridge.isPaired(activity)) {
+                    ToastUtil.show(activity, "已开启，打开支付宝后生效")
+                }
+            } else {
+                // 关闭即撤销副本：宿主那条 reloadConfig 在未配对、宿主未运行或频控命中时都不生效
+                HostBridge.revokeMirrorToken(activity)
+            }
             activity.broadcastReloadConfig()
             // 关闭时**不清空** debug 日志：抓到的包是排查证据，要清空请到日志页点「删除」
         }

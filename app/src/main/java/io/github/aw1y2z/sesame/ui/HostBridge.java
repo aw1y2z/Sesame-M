@@ -44,6 +44,24 @@ public final class HostBridge {
         return getToken(context) != null;
     }
 
+    /**
+     * 撤销共享目录里的令牌副本（关闭「抓包记录」时）。App 可直接删，不经宿主：宿主侧删除要走
+     * {@code reloadConfig} 广播，未配对、宿主未运行或频控命中时都不生效。
+     */
+    public static void revokeMirrorToken(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            java.io.File mirror = io.github.aw1y2z.sesame.util.FileUtil.getLegacyHttpTokenFile();
+            if (mirror.exists() && !mirror.delete()) {
+                android.util.Log.w(TAG, "revoke mirror token failed: " + mirror);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "revoke mirror token failed", t);
+        }
+    }
+
     /** 忘记令牌：令牌被宿主重置或鉴权一直失败时调用，之后需要重新配对 */
     public static void clearToken(Context context) {
         if (context != null) {
