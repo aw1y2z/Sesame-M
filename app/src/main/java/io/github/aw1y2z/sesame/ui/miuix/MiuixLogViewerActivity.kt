@@ -276,7 +276,9 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
     val context = LocalContext.current
     // 增量读取器:只在文件真有新增时解析新增部分,避免运行日志每秒整份重读重解析
     val logReader = remember(logType) { LogTailReader() }
-    var entries by remember(logType) { mutableStateOf(logReader.poll(logType.file)) }
+    // 首帧只留空列表:整份日志在组合之后的 IO 线程读取,解析压在组合阶段会卡住首帧
+    var entries by remember(logType) { mutableStateOf<List<LogEntry>>(emptyList()) }
+    var loaded by remember(logType) { mutableStateOf(false) }
     var revision by remember(logType) { mutableStateOf(0) }
     // 搜索文本
     var searchQuery by remember { mutableStateOf("") }
@@ -299,7 +301,8 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
     // 全局轮次锚点:从运行日志全文提取"开始执行"(执行起点)与"模块初始化开始"(加载起点)
     // 行的时间戳(升序)。读取全文(不受单页 500 条/尾部字节上限约束),确保全天各轮次的
     // 开始标记都能作为锚点,使森林/庄园/金豆/其他记录也能按统一执行周期正确划分轮次。
-    val runtimeAnchors = remember { readRuntimeAnchors() }
+    // 同上,读取全文也在 IO 线程进行;读完前用空锚点(各页退化为单轮显示)
+    var runtimeAnchors by remember { mutableStateOf(RuntimeAnchors(emptyList(), emptyList())) }
     // 按轮聚合;搜索在聚合后的轮次内逐条匹配
     val runEntries = remember(entries, runtimeAnchors) {
         aggregateByRun(entries, runtimeAnchors.runStarts, runtimeAnchors.initStarts)
@@ -318,12 +321,20 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
 
     // 定时刷新:只读新增的字节并增量解析;有新条目才更新列表与滚动标记
     LaunchedEffect(logType) {
+        val file = logType.file
+        // 首次读取:整份日志与轮次锚点都在 IO 线程解析,读完才置 loaded,
+        // 中间的空列表显示「加载中」而不是「(空)」
+        val (first, anchors) = withContext(Dispatchers.IO) {
+            logReader.poll(file) to readRuntimeAnchors()
+        }
+        entries = first
+        runtimeAnchors = anchors
+        loaded = true
         while (true) {
             delay(LOG_REFRESH_INTERVAL_MS)
             if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                 continue
             }
-            val file = logType.file
             val updated = withContext(Dispatchers.IO) { logReader.poll(file) }
             // 无新增时读取器返回原实例:据此跳过重组(否则每秒都要重建整份列表)
             if (updated !== entries) {
@@ -507,7 +518,11 @@ fun LogScreen(activity: MiuixLogViewerActivity, logType: LogType) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (searchQuery.isNotEmpty() || selectedTag != null) "无匹配日志" else "(空)",
+                        text = when {
+                            !loaded -> "加载中…"
+                            searchQuery.isNotEmpty() || selectedTag != null -> "无匹配日志"
+                            else -> "(空)"
+                        },
                         fontSize = 14.sp,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary
                     )
