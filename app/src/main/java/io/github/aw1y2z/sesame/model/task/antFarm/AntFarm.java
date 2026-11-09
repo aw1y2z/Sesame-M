@@ -85,6 +85,9 @@ public class AntFarm extends ModelTask {
      */
     private static final int MAX_GAME_DRAW_ROUND = 6;
 
+    /** 小鸡乐园单次对局的轮次上限：防 remainingGameCount 恒回正值时每 2s 无限重刷 */
+    private static final int MAX_GAME_ROUNDS = 20;
+
     /** 投喂被服务端拒绝的「饲料槽已满」结果码（按码判据，不认文案） */
     private static final String CODE_FEED_TROUGH_FULL = "331";
     /** 小鸡所在空间标识：家庭空间。睡觉/起床靠它区分走家庭接口还是个人小屋接口 */
@@ -1719,7 +1722,14 @@ public class AntFarm extends ModelTask {
 
     private void recordFarmGame(GameType gameType) {
         try {
+            // remainingGameCount 由服务端下发，一直回正值就会每 2s 无限刷一遍；
+            // 加轮次上限，正常对局次数远小于此值
+            int loopCount = 0;
             do {
+                if (++loopCount > MAX_GAME_ROUNDS) {
+                    Log.i(TAG, "小鸡乐园🎮游玩次数超过上限，本轮停止");
+                    break;
+                }
                 try {
                     JSONObject jo = new JSONObject(AntFarmRpcCall.initFarmGame(gameType.name()));
                     if (!MessageUtil.checkMemo(TAG, jo)) {

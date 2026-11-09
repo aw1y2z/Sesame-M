@@ -862,6 +862,15 @@ public class AntForestV2 extends ModelTask {
     /** 明细翻页上限：防服务端异常恒回 hasMore 时死循环；好友多的账号单日明细可超旧上限，故放宽到 100 页（=20000 条）以覆盖整天记录。 */
     private static final int ENERGY_RECORD_MAX_PAGES = 100;
 
+    /** 单次巡护前行的轮次上限：防服务端恒回 GOING 时 100ms 一轮无限重发 */
+    private static final int MAX_PATROL_STEPS = 50;
+
+    /** 巡护外层轮次上限：每轮最多走一步/换一次图，上限过小会把剩余步骤挤到下一轮才做 */
+    private static final int MAX_PATROL_ROUNDS = 100;
+
+    /** 保护地任务每轮只处理一个，上限按「单次运行尽量做完」放宽，靠状态未推进提前收手 */
+    private static final int MAX_MONOPOLY_TASK_ROUNDS = 100;
+
     /**
      * 用服务端能量明细**覆盖**今日收取能量，取代逐点累加的口径。
      * <p>只统计**今日 0 点之后**的记录：{@code nextId} 是时间戳游标，从 0 开始倒序翻页，
@@ -4431,9 +4440,10 @@ public class AntForestV2 extends ModelTask {
             // 换图/走路/兑换都用 continue 回到循环头，原本没有任何终止条件：
             // 服务端状态不前进时会一直重发，整轮卡死且后面任务全不执行
             int loopCount = 0;
+            String lastState = null;
             th:
             do {
-                if (++loopCount > 20) {
+                if (++loopCount > MAX_PATROL_ROUNDS) {
                     Log.i(TAG, "巡护⚖️循环超过上限，本轮停止");
                     break;
                 }
@@ -4441,6 +4451,19 @@ public class AntForestV2 extends ModelTask {
                 TimeUtil.sleep(500);
                 if (!MessageUtil.checkResultCode(TAG, jo)) {
                     return;
+                }
+                JSONObject patrolState = jo.optJSONObject("userPatrol");
+                if (patrolState != null) {
+                    // 本轮开局状态与上一轮完全相同：上一轮的走步/兑换/换图没让任何字段前进，
+                    // 再循环只是原样空转，直接收手
+                    String state = patrolState.optInt("patrolId") + "/" + patrolState.optInt("currentNode")
+                            + "/" + patrolState.optString("currentStatus") + "/"
+                            + patrolState.optJSONObject("chance");
+                    if (state.equals(lastState)) {
+                        Log.i(TAG, "巡护⚖️状态未推进，本轮停止");
+                        break;
+                    }
+                    lastState = state;
                 }
                 JSONObject resData = new JSONObject(AntForestRpcCall.queryMyPatrolRecord());
                 TimeUtil.sleep(500);
@@ -4512,7 +4535,16 @@ public class AntForestV2 extends ModelTask {
 
     private void patrolKeepGoing(String s, int nodeIndex, int patrolId) {
         try {
+            // 服务端持续回 GOING、currentNode 却不推进时，这里原本 100ms 一轮无限重发，
+            // 外层 queryUserPatrol 的轮次上限挡不住单次调用内部死循环
+            int loopCount = 0;
+            int lastNode = Integer.MIN_VALUE;
+            int unchanged = 0;
             do {
+                if (++loopCount > MAX_PATROL_STEPS) {
+                    Log.i(TAG, "巡护⚖️前行次数超过上限，本轮停止");
+                    return;
+                }
                 if (s == null) {
                     s = AntForestRpcCall.patrolKeepGoing(nodeIndex, patrolId, "image");
                 }
@@ -4526,6 +4558,16 @@ public class AntForestV2 extends ModelTask {
                 }
                 JSONObject userPatrol = jo.getJSONObject("userPatrol");
                 int currentNode = userPatrol.getInt("currentNode");
+                // 连续多轮节点不变：巡护没有推进，再发也是同一响应
+                if (currentNode == lastNode) {
+                    if (++unchanged >= 3) {
+                        Log.i(TAG, "巡护⚖️节点连续未前进，本轮停止");
+                        return;
+                    }
+                } else {
+                    unchanged = 0;
+                    lastNode = currentNode;
+                }
                 JSONObject events = jo.getJSONArray("events").getJSONObject(0);
                 JSONObject rewardInfo = events.optJSONObject("rewardInfo");
                 if (rewardInfo != null) {
@@ -4884,8 +4926,11 @@ public class AntForestV2 extends ModelTask {
         String sceneCode = MONOPOLY_TASK_SCENE_HSDWY;
         boolean changed = false;
         try {
-            // 每轮只处理一个任务，最多 20 轮：服务端状态不变时靠轮次上限收敛
-            for (int round = 0; round < 20; round++) {
+            // 每轮只处理一个任务：任务多的区域 20 轮做不完，剩下的只能等下一轮任务运行才处理，
+            // 故上限放到 100 轮；再用任务列表快照兜底，操作后列表连续不变说明服务端没认账
+            String lastSnapshot = null;
+            int sameSnapshot = 0;
+            for (int round = 0; round < MAX_MONOPOLY_TASK_ROUNDS; round++) {
                 JSONObject jo = monopolyResponse(AntForestRpcCall.listMonopolyTasks(regionCode, sceneCode));
                 if (!MessageUtil.checkSuccess(TAG, jo)) {
                     return changed;
@@ -4926,6 +4971,18 @@ public class AntForestV2 extends ModelTask {
                 }
                 if (!acted) {
                     return changed;
+                }
+                // 处理过任务但重拉到的列表与上一轮完全相同：完成/领奖没让任何状态变化，
+                // 再循环只会对同一任务空转。容忍一轮异步落态，连续两轮相同才收手
+                String snapshot = taskInfoList.toString();
+                if (snapshot.equals(lastSnapshot)) {
+                    if (++sameSnapshot >= 2) {
+                        Log.i(TAG, "新版保护地🌲任务状态未推进，本轮停止");
+                        return changed;
+                    }
+                } else {
+                    sameSnapshot = 0;
+                    lastSnapshot = snapshot;
                 }
             }
         } catch (Throwable t) {
