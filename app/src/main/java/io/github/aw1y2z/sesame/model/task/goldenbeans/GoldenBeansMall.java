@@ -178,16 +178,32 @@ public final class GoldenBeansMall {
                 Log.goldenBeans("金豆商城🎁兑换失败[" + name + "]#" + GoldenBeansSupport.describe(jo));
                 return false;
             }
-            if (!jo.optBoolean("canBuy", false)) {
-                Log.goldenBeans("金豆商城⏭️服务端判定不可兑[" + name + "]");
+            // 成功体可能整体包在 data 下（本项目其它接口多为该形态），canBuy / orderNo 同层取值
+            JSONObject data = jo.optJSONObject("data");
+            boolean hasCanBuyAtRoot = jo.has("canBuy");
+            boolean hasCanBuyInData = data != null && data.has("canBuy");
+            boolean canBuy = hasCanBuyAtRoot ? jo.optBoolean("canBuy", false)
+                    : (hasCanBuyInData && data.optBoolean("canBuy", false));
+            if (!canBuy) {
+                // 区分「服务端明确拒绝」与「响应里没有 canBuy 字段」，后者说明字段层级还有别的可能
+                Log.goldenBeans("金豆商城⏭️服务端判定不可兑[" + name + "]#"
+                        + (hasCanBuyAtRoot || hasCanBuyInData ? "canBuy=false" : "响应未返回canBuy字段"));
                 return false;
             }
-            int after = orderCount(interval);
-            if (after <= before) {
-                Log.record("金豆商城⚠️兑换未落单[" + name + "]#订单数未增加");
-                return false;
+            // 订单列表只取首页 20 条：满页之后新订单不会让条数增加，原判定会把成功当失败，
+            // 命中一次就再也不敢记次数。优先用响应里的订单号确认落单，没有才回退到前后条数对比
+            String orderNo = jo.optString("orderNo", "");
+            if (orderNo.isEmpty() && data != null) {
+                orderNo = data.optString("orderNo", "");
             }
-            Log.goldenBeans("金豆商城🎁兑换[" + name + "]#花费[" + cost + "罐]#订单[" + jo.optString("orderNo", "") + "]");
+            if (orderNo.isEmpty()) {
+                int after = orderCount(interval);
+                if (after <= before) {
+                    Log.record("金豆商城⚠️兑换未落单[" + name + "]#订单数未增加");
+                    return false;
+                }
+            }
+            Log.goldenBeans("金豆商城🎁兑换[" + name + "]#花费[" + cost + "罐]#订单[" + orderNo + "]");
             Status.setIntFlagToday(FLAG_EXCHANGE_PREFIX + name, Status.getIntFlagToday(FLAG_EXCHANGE_PREFIX + name) + 1);
             return true;
         } catch (Throwable th) {
@@ -205,6 +221,11 @@ public final class GoldenBeansMall {
             return 0;
         }
         JSONArray orders = jo.optJSONArray("orderInfos");
+        if (orders == null) {
+            // 与兑换接口一致：订单列表也可能包在 data 下
+            JSONObject data = jo.optJSONObject("data");
+            orders = data != null ? data.optJSONArray("orderInfos") : null;
+        }
         return orders != null ? orders.length() : 0;
     }
 

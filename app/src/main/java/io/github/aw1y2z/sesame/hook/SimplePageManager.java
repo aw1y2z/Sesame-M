@@ -168,7 +168,13 @@ public class SimplePageManager {
      * 打印所有 TextView 的文本内容；只应由 {@link #tryGetTopView} 在「抓包记录」打开时调用
      */
     private static void debugPrintAllTextViews(View view, int depth) {
-        String indent = "  ".repeat(depth);
+        // 不用 String.repeat：它是 API 33 才有的平台方法，minSdk 26 且未开 desugar，
+        // Android 8–12 上会抛 NoSuchMethodError，把整条抓包记录链路打断
+        StringBuilder indentBuilder = new StringBuilder(depth * 2);
+        for (int i = 0; i < depth; i++) {
+            indentBuilder.append("  ");
+        }
+        String indent = indentBuilder.toString();
         if (view instanceof TextView) {
             TextView textView = (TextView) view;
             String text = textView.getText() != null ? textView.getText().toString() : "";

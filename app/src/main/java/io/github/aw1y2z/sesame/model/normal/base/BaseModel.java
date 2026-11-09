@@ -88,6 +88,8 @@ public class BaseModel extends Model {
         modelFields.addField(energyTime);
         modelFields.addField(timedTaskModel);
         modelFields.addField(timeoutRestart);
+        // 字段早已声明并被 AntForestV2 / OldRpcBridge 读取，但漏了注册，导致界面无法修改、恒为默认 60 分钟
+        modelFields.addField(waitWhenException);
         modelFields.addField(backupConfigDays);
         modelFields.addField(rpcRequestList);
         modelFields.addField(rpcRequestTaskList);

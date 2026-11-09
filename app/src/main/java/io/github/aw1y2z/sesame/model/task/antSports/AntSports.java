@@ -620,12 +620,17 @@ public class AntSports extends ModelTask {
             }
             JSONArray ja = data.getJSONArray("recBubbleList");
             for (int i = 0; i < ja.length(); i++) {
-                jo = ja.getJSONObject(i);
-                if (!data.has("assetId")) {
-                    return;
+                jo = ja.optJSONObject(i);
+                if (jo == null) {
+                    continue;
                 }
-                String assetId = jo.getString("assetId");
-                int coinAmount = jo.getInt("coinAmount");
+                // 原实现判的是外层 data 有没有 assetId：气泡的资产在单条记录里，外层永远没有，
+                // 于是整个功能一次都不会发请求。改为逐条判，缺字段只跳过当前气泡
+                String assetId = jo.optString("assetId");
+                if (assetId.isEmpty()) {
+                    continue;
+                }
+                int coinAmount = jo.optInt("coinAmount", 0);
                 String simpleSourceName = jo.optString("simpleSourceName");
                 if (receiveCoinAsset(assetId, coinAmount, simpleSourceName, jo.optString("taskId"))) {
                     TimeUtil.sleep(500);

@@ -703,30 +703,40 @@ public class AntFarm extends ModelTask {
             if (!MessageUtil.checkMemo(TAG, jo)) {
                 return null;
             }
-            rewardProductNum = jo.getJSONObject("dynamicGlobalConfig").getString("rewardProductNum");
-            JSONObject joFarmVO = jo.getJSONObject("farmVO");
-            foodStock = joFarmVO.getInt("foodStock");
-            foodStockLimit = joFarmVO.getInt("foodStockLimit");
-            harvestBenevolenceScore = joFarmVO.getDouble("harvestBenevolenceScore");
+            JSONObject globalConfig = jo.optJSONObject("dynamicGlobalConfig");
+            rewardProductNum = globalConfig != null ? globalConfig.optString("rewardProductNum") : "";
+            JSONObject joFarmVO = jo.optJSONObject("farmVO");
+            if (joFarmVO == null) {
+                Log.i(TAG, "enterFarm 响应缺少 farmVO，本轮跳过");
+                return null;
+            }
+            foodStock = joFarmVO.optInt("foodStock", 0);
+            foodStockLimit = joFarmVO.optInt("foodStockLimit", 0);
+            harvestBenevolenceScore = joFarmVO.optDouble("harvestBenevolenceScore", 0d);
             parseSyncAnimalStatusResponse(joFarmVO.toString());
-            ownerUserId = joFarmVO.getJSONObject("masterUserInfoVO").getString("userId");
+            JSONObject masterUserInfo = joFarmVO.optJSONObject("masterUserInfoVO");
+            ownerUserId = masterUserInfo != null ? masterUserInfo.optString("userId") : "";
+            if (ownerUserId.isEmpty()) {
+                Log.i(TAG, "enterFarm 响应缺少农场主信息，本轮跳过");
+                return null;
+            }
             ownerGroupId = getFamilyGroupId(ownerUserId);
 
-            if (jo.has("activityData")) {
-                JSONObject activityData = jo.optJSONObject("activityData");
-                if (activityData.has("springGifts")) {
-                    JSONArray springGifts = activityData.optJSONArray("springGifts");
-                    if (springGifts != null) {
-                        for (int i = 0; i < springGifts.length(); i++) {
-                            JSONObject springGift = springGifts.getJSONObject(i);
-                            String foodType = springGift.optString("foodType");
-                            int giftIndex = springGift.optInt("giftIndex");
-                            String foodSubType = springGift.optString("foodSubType");
-                            int foodCount = springGift.optInt("foodCount");
-                            AntFarmRpcCall.clickForGiftV2(foodType, giftIndex);
-                            if (MessageUtil.checkMemo(TAG, jo)) {
-                                Log.farm("惊喜礼包🎁[" + foodSubType + "*" + foodCount + "]");
-                            }
+            // activityData 字段存在但值为 null 时 has() 为真、optJSONObject 为 null：原写法在这里 NPE，
+            // 后面的喂食/领奖/捐蛋整轮都被跳过
+            JSONObject activityData = jo.optJSONObject("activityData");
+            if (activityData != null && activityData.has("springGifts")) {
+                JSONArray springGifts = activityData.optJSONArray("springGifts");
+                if (springGifts != null) {
+                    for (int i = 0; i < springGifts.length(); i++) {
+                        JSONObject springGift = springGifts.getJSONObject(i);
+                        String foodType = springGift.optString("foodType");
+                        int giftIndex = springGift.optInt("giftIndex");
+                        String foodSubType = springGift.optString("foodSubType");
+                        int foodCount = springGift.optInt("foodCount");
+                        AntFarmRpcCall.clickForGiftV2(foodType, giftIndex);
+                        if (MessageUtil.checkMemo(TAG, jo)) {
+                            Log.farm("惊喜礼包🎁[" + foodSubType + "*" + foodCount + "]");
                         }
                     }
                 }
@@ -744,7 +754,8 @@ public class AntFarm extends ModelTask {
             if (jo.has("lotteryPlusInfo")) {
                 drawLotteryPlus(jo.getJSONObject("lotteryPlusInfo"));
             }
-            if (acceptGift.getValue() && joFarmVO.getJSONObject("subFarmVO").has("giftRecord") && foodStockLimit - foodStock >= 10) {
+            JSONObject subFarmVO = joFarmVO.optJSONObject("subFarmVO");
+            if (acceptGift.getValue() && subFarmVO != null && subFarmVO.has("giftRecord") && foodStockLimit - foodStock >= 10) {
                 acceptGift();
             }
             return jo;

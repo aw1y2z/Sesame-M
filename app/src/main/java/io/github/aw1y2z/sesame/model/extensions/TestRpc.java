@@ -18,7 +18,12 @@ public class TestRpc {
 
             @Override
             public void run() {
-                ExtensionsHandle.handleRequest(testType, broadcastFun, broadcastData);
+                // 裸线程抛出的异常无人接，会走到宿主默认处理器直接杀进程
+                try {
+                    ExtensionsHandle.handleRequest(testType, broadcastFun, broadcastData);
+                } catch (Throwable th) {
+                    io.github.aw1y2z.sesame.util.Log.printStackTrace(TAG, th);
+                }
             }
         }.setData(broadcastFun, broadcastData, testType).start();
     }

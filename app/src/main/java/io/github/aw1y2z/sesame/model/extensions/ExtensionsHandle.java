@@ -21,6 +21,11 @@ public class ExtensionsHandle {
     private static final String TAG = ExtensionsHandle.class.getSimpleName();
 
     public static void handleRequest(String type, String fun, Object data) {
+        // type 来自广播 extra，可能取不到：switch(null) 会抛 NPE，而调用点在裸线程里
+        if (type == null) {
+            Log.i(TAG, "扩展请求缺少 type，已忽略");
+            return;
+        }
         if (handleAlphaRequest(type, fun, data) != null) {
             return;
         }

@@ -659,15 +659,19 @@ public class ApplicationHook extends XposedModule {
             List<String> wakenAtTimeList = BaseModel.getWakenAtTimeList().getValue();
             if (wakenAtTimeList != null && !wakenAtTimeList.isEmpty()) {
                 Calendar nowCalendar = Calendar.getInstance();
-                for (int i = 1, len = wakenAtTimeList.size(); i < len; i++) {
+                // 从 0 开始：原实现从下标 1 起，第一个唤醒时刻永远不注册（只配一个时刻时整体失效）。
+                // request code 用 seq(1..n) 而不是下标：0 已被上面的 00:00 闹钟占用，
+                // 复用同一个 request code 会让两个 PendingIntent 互相顶掉
+                for (int i = 0, len = wakenAtTimeList.size(); i < len; i++) {
                     try {
+                        int seq = i + 1;
                         String wakenAtTime = wakenAtTimeList.get(i);
                         Calendar wakenAtTimeCalendar = TimeUtil.getTodayCalendarByTimeStr(wakenAtTime);
                         if (wakenAtTimeCalendar != null) {
                             if (wakenAtTimeCalendar.compareTo(nowCalendar) > 0) {
-                                PendingIntent wakenAtTimePendingIntent = PendingIntent.getBroadcast(context, i, new Intent("com.eg.android.AlipayGphone.sesame.execute"), getPendingIntentFlag());
+                                PendingIntent wakenAtTimePendingIntent = PendingIntent.getBroadcast(context, seq, new Intent("com.eg.android.AlipayGphone.sesame.execute"), getPendingIntentFlag());
                                 if (setAlarmTask(wakenAtTimeCalendar.getTimeInMillis(), wakenAtTimePendingIntent)) {
-                                    String wakenAtTimeKey = i + "|" + wakenAtTime;
+                                    String wakenAtTimeKey = seq + "|" + wakenAtTime;
                                     wakenAtTimeAlarmMap.put(wakenAtTimeKey, wakenAtTimePendingIntent);
                                     Log.record("设置定时唤醒:" + wakenAtTimeKey);
                                 }
