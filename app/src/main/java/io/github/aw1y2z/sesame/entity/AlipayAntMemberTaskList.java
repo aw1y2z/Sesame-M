@@ -24,6 +24,11 @@ public class AlipayAntMemberTaskList extends IdAndName {
         return list;
     }
 
+    /** 清掉静态缓存，下次 getList() 重新从映射构建；配置进程载入新映射后必须调用。 */
+    public static void clear() {
+        list = null;
+    }
+
     public static void remove(String id) {
         getList();
         for (int i = 0; i < list.size(); i++) {

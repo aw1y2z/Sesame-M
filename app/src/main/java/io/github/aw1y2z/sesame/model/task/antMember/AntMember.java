@@ -14,6 +14,7 @@ import io.github.aw1y2z.sesame.data.task.ModelTask;
 import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
 import io.github.aw1y2z.sesame.data.task.TaskAward;
 import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
+import io.github.aw1y2z.sesame.entity.AlipayAntMemberAdTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayAntMemberTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayMemberCreditSesameTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayWelfareFundTaskList;
@@ -27,6 +28,7 @@ import io.github.aw1y2z.sesame.model.extensions.ExtensionsHandle;
 import io.github.aw1y2z.sesame.model.task.antOrchard.AntOrchard;
 import io.github.aw1y2z.sesame.model.task.antOrchard.AntOrchardRpcCall;
 import io.github.aw1y2z.sesame.util.*;
+import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.MemberBenefitIdMap;
 import io.github.aw1y2z.sesame.util.idMap.MemberCreditSesameTaskListMap;
@@ -117,7 +119,7 @@ public class AntMember extends BaseAntMember {
         modelFields.addField(AntMemberTaskList = new SelectModelField("AntMemberTaskList", "会员任务 | 黑名单列表", new LinkedHashSet<>(), AlipayAntMemberTaskList::getList).setDependsOn("AutoAntMemberTaskList"));
         modelFields.addField(enableAdTask = new BooleanModelField("AntMemberAdTask", "会员广告任务", false));
         modelFields.addField(AutoAntMemberAdTaskList = new BooleanModelField("AutoAntMemberAdTaskList", "会员广告任务 | 自动黑名单", true).setDependsOn("AntMemberAdTask"));
-        modelFields.addField(AntMemberAdTaskList = new SelectModelField("AntMemberAdTaskList", "会员广告任务 | 黑名单列表", new LinkedHashSet<>(), AlipayAntMemberTaskList::getList).setDependsOn("AutoAntMemberAdTaskList"));
+        modelFields.addField(AntMemberAdTaskList = new SelectModelField("AntMemberAdTaskList", "会员广告任务 | 黑名单列表", new LinkedHashSet<>(), AlipayAntMemberAdTaskList::getList).setDependsOn("AutoAntMemberAdTaskList"));
         modelFields.addField(memberSign = new BooleanModelField("memberSign", "会员签到", false));
         modelFields.addField(memberPointExchangeBenefit = new BooleanModelField("memberPointExchangeBenefit", "会员积分 | 兑换权益", false));
         modelFields.addField(memberPointExchangeBenefitList = new SelectModelField("memberPointExchangeBenefitList", "会员积分 | 权益列表", new LinkedHashSet<>(), MemberBenefit::getList).setDependsOn("memberPointExchangeBenefit"));
@@ -155,10 +157,18 @@ public class AntMember extends BaseAntMember {
     @Override
     public void run() {
         try {
+            // 映射是进程内存态，重启后为空，每轮先按账号载入（当天不会重复拉列表）
+            AntMemberTaskListMap.load();
+            AntMemberAdTaskListMap.load();
             //初始任务列表
             if (!Status.hasFlagToday("BlackList::initMember")) {
                 initMemberTaskListMap(AutoAntMemberTaskList.getValue(), AutoMemberCreditSesameTaskList.getValue(), AntMemberTask.getValue(), collectSesame.getValue());
                 Status.flagToday("BlackList::initMember");
+            }
+            else if (AntMemberTaskListMap.getMap().isEmpty() && !Status.hasFlagToday("BlackList::initMemberRecover")) {
+                // 当天已初始化过、映射却为空：补拉一次，否则配置页候选项会一直是空的
+                Status.flagToday("BlackList::initMemberRecover");
+                initMemberTaskListMap(AutoAntMemberTaskList.getValue(), AutoMemberCreditSesameTaskList.getValue(), AntMemberTask.getValue(), collectSesame.getValue());
             }
             
             if (memberSign.getValue()) {
@@ -178,7 +188,7 @@ public class AntMember extends BaseAntMember {
             }
             if (enableAdTask.getValue()) {
                 if (AutoAntMemberAdTaskList.getValue()) {
-                    Set<String> blackList = MessageUtil.presetBlackList("AntMemberAdTask", "AntMemberAdTaskList");
+                    Set<String> blackList = MessageUtil.presetBlackList("AntMember", "AntMemberAdTaskList");
                     Set<String> whiteList = new LinkedHashSet<>();
                     whiteList.add("会员签到");
                     whiteList.add("会员积分");
@@ -188,7 +198,7 @@ public class AntMember extends BaseAntMember {
                     whiteList.add("网商银行");
                     whiteList.add("蚂蚁积分");
                     whiteList.add("攒积分");
-                    MessageUtil.syncTaskBlackList("AntMemberAdTask", "AntMemberAdTaskList", blackList, whiteList, AntMemberAdTaskList);
+                    MessageUtil.syncTaskBlackList("会员广告任务", "AntMemberAdTaskList", blackList, whiteList, AntMemberAdTaskList);
                 }
                 // 广告任务：复用会员任务的取数结果(共享缓存)，只处理 adTask=true 且无 targetBusiness 的任务
                 if (runSignPageTaskList(true, AntMemberAdTaskList.getValue())) {
@@ -245,6 +255,11 @@ public class AntMember extends BaseAntMember {
         try {
             //初始化AntMemberTaskListMap
             AntMemberTaskListMap.load();
+            AntMemberAdTaskListMap.load();
+            // 广告任务的预置黑名单（当前为空）
+            for (String task : MessageUtil.presetBlackList("AntMember", "AntMemberAdTaskList")) {
+                AntMemberAdTaskListMap.add(task, task);
+            }
             // 预置黑名单登记在 MessageUtil（单一真相，配置页据此标注"默认"）
             Set<String> blackList = MessageUtil.presetBlackList("AntMember", "AntMemberTaskList");
             // 可继续添加更多黑名单任务
@@ -305,6 +320,9 @@ public class AntMember extends BaseAntMember {
                 
                 //保存任务到配置文件
                 AntMemberTaskListMap.save();
+                if (!AntMemberAdTaskListMap.getMap().isEmpty()) {
+                    AntMemberAdTaskListMap.save();
+                }
                 Log.record("同步任务🉑会员任务列表");
                 
                 //自动按模块初始化设定调整黑名单和白名单

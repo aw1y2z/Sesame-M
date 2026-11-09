@@ -610,6 +610,10 @@ public class FileUtil {
     public static File getAntMemberTaskListMapFile() {
         return getFile(MAIN_DIRECTORY_FILE, "AntMemberTask.json");
     }
+
+    public static File getAntMemberAdTaskListMapFile() {
+        return getFile(MAIN_DIRECTORY_FILE, "AntMemberAdTask.json");
+    }
     
     public static File getExportedStatisticsFile() {
         String storageDirStr = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) + File.separator + CONFIG_DIRECTORY_NAME;

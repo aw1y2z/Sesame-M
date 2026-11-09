@@ -13,6 +13,7 @@ import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
 import io.github.aw1y2z.sesame.util.Status;
 import io.github.aw1y2z.sesame.util.TimeUtil;
+import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
 
@@ -48,6 +49,25 @@ public abstract class BaseAntMember extends ModelTask {
     /** 日志标签：adOnly=true 用「会员广告任务」，false 用「会员任务」 */
     private static String labelFor(boolean adOnly) {
         return adOnly ? "会员广告任务" : "会员任务";
+    }
+
+    /** 广告任务判定：adTask=true 且无 targetBusiness。运行期过滤与候选项登记共用，避免两处判据漂移。 */
+    static boolean isAdTask(JSONObject task) {
+        if (task == null || !task.optBoolean("adTask")) {
+            return false;
+        }
+        JSONObject cfg = task.optJSONObject("taskConfigInfo");
+        if (cfg == null) {
+            cfg = task.optJSONObject("simpleTaskConfig");
+        }
+        JSONArray tb = cfg == null ? null : cfg.optJSONArray("targetBusiness");
+        if (tb == null || tb.length() == 0) {
+            tb = task.optJSONArray("targetBusiness");
+        }
+        if (tb != null && tb.length() > 0) {
+            return false;
+        }
+        return task.optString("targetBusiness", "").isEmpty();
     }
 
     @Override
@@ -216,7 +236,12 @@ public abstract class BaseAntMember extends ModelTask {
                         taskName = cfg.optString("title", "");
                     }
                     if (!taskName.isEmpty()) {
-                        AntMemberTaskListMap.add(taskName, taskName);
+                        // 两类黑名单的候选项分开收集
+                        if (isAdTask(task)) {
+                            AntMemberAdTaskListMap.add(taskName, taskName);
+                        } else {
+                            AntMemberTaskListMap.add(taskName, taskName);
+                        }
                     }
                 }
                 if ("BROWSE".equals(type)) {
@@ -235,7 +260,13 @@ public abstract class BaseAntMember extends ModelTask {
                     }
                 }
             }
-            AntMemberTaskListMap.save();
+            // 空 map 不落盘，否则会覆盖掉磁盘上已有的任务名
+            if (!AntMemberTaskListMap.getMap().isEmpty()) {
+                AntMemberTaskListMap.save();
+            }
+            if (!AntMemberAdTaskListMap.getMap().isEmpty()) {
+                AntMemberAdTaskListMap.save();
+            }
         } catch (Throwable t) {
             Log.err(TAG, "processSignPageTaskList err:", t);
         }
@@ -340,8 +371,7 @@ public abstract class BaseAntMember extends ModelTask {
                     targetBusinessArr = new JSONArray().put(tb);
                 }
             }
-            // 广告任务判定：adTask=true 且无 targetBusiness
-            boolean isAd = task.optBoolean("adTask") && (targetBusinessArr == null || targetBusinessArr.length() == 0);
+            boolean isAd = isAdTask(task);
             if (adOnly) {
                 // 仅处理广告任务的路径：非广告任务直接跳过，交给会员路径
                 if (!isAd) {
@@ -415,12 +445,15 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject extMap = task.optJSONObject("lightsAdExtMap");
             if (extMap == null) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务缺少扩展参数");
+                // 结构缺参数重试也不会变，按连续确认记账
+                MessageUtil.MarkTaskBlackListConfirm("AntMember", "AntMemberAdTaskList", "会员广告任务", name);
                 return false;
             }
             String bizId = extMap.optString("bizId", "");
             String adId = extMap.optString("adId", "");
             if (bizId.isEmpty() || adId.isEmpty()) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务缺少bizId/adId");
+                MessageUtil.MarkTaskBlackListConfirm("AntMember", "AntMemberAdTaskList", "会员广告任务", name);
                 return false;
             }
             int awardNum = 0;
@@ -431,6 +464,7 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject applyJo = new JSONObject(AntMemberRpcCall.applyAdTask(bizId, adId, awardNum, extMap));
             if (!isAdTaskOk(applyJo)) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务申请失败");
+                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberAdTaskList", name, applyJo);
                 return false;
             }
             // 广告任务需浏览一段时间(约15秒)后才能完成
@@ -439,6 +473,7 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject finishJo = new JSONObject(AntMemberRpcCall.finishAdTask(bizId));
             if (!isAdTaskOk(finishJo)) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务完成失败");
+                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberAdTaskList", name, finishJo);
                 return false;
             }
             Log.other(label + "🎖️完成[" + name + "]#获得[" + awardNum + "积分]");

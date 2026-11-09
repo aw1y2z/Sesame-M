@@ -1,5 +1,7 @@
 package io.github.aw1y2z.sesame.data;
 
+import io.github.aw1y2z.sesame.entity.AlipayAntMemberAdTaskList;
+import io.github.aw1y2z.sesame.entity.AlipayAntMemberTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayGoldenBeansMallItem;
 import io.github.aw1y2z.sesame.entity.AlipayGoldTicketTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayWelfareFundTaskList;
@@ -11,6 +13,7 @@ import io.github.aw1y2z.sesame.util.idMap.AntFarmDoFarmTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDrawMachineTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntForestHuntTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntForestVitalityTaskListMap;
+import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntOceanAntiepTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntOceanFishBlackListMap;
@@ -83,6 +86,9 @@ public final class ConfigPreload {
         AntSportsTaskListMap.load();
         PathThemeMapListMap.load();
         AntMemberTaskListMap.load();
+        AlipayAntMemberTaskList.clear();
+        AntMemberAdTaskListMap.load();
+        AlipayAntMemberAdTaskList.clear();
         GoldenBeansTaskListMap.load();
         GoldenBeansMallItemMap.load();
         // 候选实体的静态缓存是注入进程写的，App 进程必须清一次才会重建
