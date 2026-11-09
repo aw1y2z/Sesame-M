@@ -1,6 +1,5 @@
 package io.github.aw1y2z.sesame.model.task.antForest;
 
-import android.annotation.SuppressLint;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -8,7 +7,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import io.github.aw1y2z.sesame.util.Status;
@@ -25,10 +23,13 @@ public class WhackMole {
     private static final String TAG = "WhackMole";
     private static final String SOURCE = "senlinguangchangdadishu";
     private static final String EXEC_FLAG = "forest::whackMole::executed";
+    private static final String FAIL_FLAG = EXEC_FLAG + "::fail";
+    /** 今日失败次数上限：失败不锁全天，但也不能无限重发请求 */
+    private static final int MAX_FAILURES = 3;
     
     private static volatile int totalGames = 5;
-    private static volatile int moleCount = 15; // 兼容模式默认击打数
-    private static final long GAME_DURATION_MS = 12000L;
+    private static volatile int moleCount = 15; // 单局击打数上限，<=0 表示不限制
+    private static final long ROUND_DURATION_MS = 6000L; // 单局时长：「6秒拼手速」
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors() * 2,
             Runtime.getRuntime().availableProcessors() * 2,
@@ -36,7 +37,6 @@ public class WhackMole {
             new LinkedBlockingQueue<>(),
             r -> new Thread(r, "WhackMole-Worker")
     );
-    private static final AtomicLong startTime = new AtomicLong(0);
     private static volatile boolean isRunning = false;
     
     /**
@@ -53,18 +53,25 @@ public class WhackMole {
     public static class GameSession {
         private final String token;
         private final int roundNumber;
-        
-        public GameSession(String token, int roundNumber) {
+        /** 本局服务端下发的地鼠 id，结算只能提交真正打过的这些 id */
+        private final List<Long> moleIds;
+
+        public GameSession(String token, int roundNumber, List<Long> moleIds) {
             this.token = token;
             this.roundNumber = roundNumber;
+            this.moleIds = moleIds;
         }
-        
+
         public String getToken() {
             return token;
         }
-        
+
         public int getRoundNumber() {
             return roundNumber;
+        }
+
+        public List<Long> getMoleIds() {
+            return moleIds;
         }
     }
     public static Boolean closeWhackMole() {
@@ -77,20 +84,6 @@ public class WhackMole {
         }
         return false;
     }
-    /**
-     * 游戏间隔计算器
-     */
-    private static class GameIntervalCalculator {
-        public static long calculateDynamicInterval(long totalDuration, int totalGames) {
-            return totalDuration / (totalGames * 2);
-        }
-        
-        public static long calculateNextDelay(long dynamicInterval, int currentRound, int totalGames, long remainingTime) {
-            long baseDelay = dynamicInterval * (currentRound % 2 + 1);
-            return Math.max(100L, Math.min(baseDelay, remainingTime / (totalGames - currentRound + 1)));
-        }
-    }
-    
     /**
      * 设置总游戏局数
      */
@@ -120,42 +113,56 @@ public class WhackMole {
             Log.record("正在运行⏭️打地鼠游戏中，跳过重复启动");
             return;
         }
+        // 今日已完成，或失败次数已达上限
+        if (Status.hasFlagToday(EXEC_FLAG) || Status.getIntFlagToday(FAIL_FLAG) >= MAX_FAILURES) {
+            return;
+        }
         isRunning = true;
-        
+
+        boolean finished = false;
         try {
             switch (mode) {
                 case COMPATIBLE:
-                    runCompatibleMode();
+                    finished = runCompatibleMode();
                     break;
                 case AGGRESSIVE:
-                    runAggressiveMode();
+                    finished = runAggressiveMode();
                     break;
             }
-            Status.flagToday(EXEC_FLAG);
         } catch (Exception e) {
             Log.printStackTrace("打地鼠异常:", e);
         } finally {
             isRunning = false;
-            Log.record("运行状态🎮打地鼠已重置");
         }
+        if (finished) {
+            Status.flagToday(EXEC_FLAG);
+        } else {
+            // 失败不直接锁全天，但累计到上限就停手，避免每轮重发整批请求
+            int failures = Status.getIntFlagToday(FAIL_FLAG) + 1;
+            Status.setIntFlagToday(FAIL_FLAG, failures);
+            if (failures >= MAX_FAILURES) {
+                Log.record("森林能量⏭️打地鼠今日已失败" + failures + "次，不再重试");
+            }
+        }
+        Log.record("运行状态🎮打地鼠已重置");
     }
     
     // ================= [ 兼容模式：对应 old 系列 RPC ] =================
-    private static void runCompatibleMode() {
+    private static boolean runCompatibleMode() {
         try {
             long startTs = System.currentTimeMillis();
-            
+
             // 1. 开始游戏 (使用 oldstartWhackMole)
             String startRespStr = AntForestRpcCall.oldstartWhackMole(SOURCE);
             JSONObject response = new JSONObject(startRespStr);
             if (!response.optBoolean("success")) {
                 Log.forest(response.optString("resultDesc", "开始失败"));
-                return;
+                return false;
             }
             JSONArray moleInfoArray = response.optJSONArray("moleInfo");
             String token = response.optString("token");
             if (moleInfoArray == null || moleInfoArray.length() == 0 || token.isEmpty()) {
-                return;
+                return false;
             }
             
             List<Long> allMoleIds = new ArrayList<>();
@@ -212,82 +219,70 @@ public class WhackMole {
             // 执行结算
             String settleRespStr = AntForestRpcCall.oldsettlementWhackMole(token, remainingIds, SOURCE);
             JSONObject settleResp = new JSONObject(settleRespStr);
-            if (MessageUtil.checkSuccess(TAG, settleResp)) {
-                int total = settleResp.optInt("totalEnergy", 0);
-                Log.forest("森林能量⚡️[兼容模式完成(打" + (remainingIds.size() + hitCount) + "个)总能量+" + total + "g]");
-                // 结算的 totalEnergy 与逐次击打的 energyAmount 是同一笔能量，只记一次
-                int gained = Math.max(total, hitEnergy);
-                if (gained > 0) {
-                    Statistics.addData(Statistics.DataType.COLLECTED, gained);
-                    Statistics.save();
-                }
+            if (!MessageUtil.checkSuccess(TAG, settleResp)) {
+                return false;
             }
+            int total = settleResp.optInt("totalEnergy", 0);
+            Log.forest("森林能量⚡️[兼容模式完成(打" + (remainingIds.size() + hitCount) + "个)总能量+" + total + "g]");
+            // 结算的 totalEnergy 与逐次击打的 energyAmount 是同一笔能量，只记一次
+            int gained = Math.max(total, hitEnergy);
+            if (gained > 0) {
+                Statistics.addData(Statistics.DataType.COLLECTED, gained);
+                Statistics.save();
+            }
+            return true;
         } catch (Throwable t) {
             Log.record("兼容模式出错:" + (t.getMessage() != null ? t.getMessage() : "未知错误"));
         }
+        return false;
     }
     
     // ================= [ 激进模式：对应 标准系列 RPC ] =================
-    @SuppressLint("DefaultLocale")
-    private static void runAggressiveMode() {
-        startTime.set(System.currentTimeMillis());
-        long dynamicInterval = GameIntervalCalculator.calculateDynamicInterval(GAME_DURATION_MS, totalGames);
-        
-        List<GameSession> sessions = new ArrayList<>();
-        try {
-            // 批量启动多局游戏
-            for (int roundNum = 1; roundNum <= totalGames; roundNum++) {
-                GameSession session = startSingleRound(roundNum);
-                if (session != null) {
-                    sessions.add(session);
-                }
-                
-                // 局间延迟
-                if (roundNum < totalGames) {
-                    long remaining = GAME_DURATION_MS - (System.currentTimeMillis() - startTime.get());
-                    long delay = GameIntervalCalculator.calculateNextDelay(dynamicInterval, roundNum, totalGames, remaining);
-                    Thread.sleep(delay);
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-        } catch (Exception e) {
-            Log.printStackTrace("激进模式启动轮次异常:", e);
-        }
-        
-        // 等待结算窗口
-        long waitTime = Math.max(0L, GAME_DURATION_MS - (System.currentTimeMillis() - startTime.get()));
-        try {
-            if (waitTime > 0) {
-                Thread.sleep(waitTime);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        // 批量结算所有有效局
+    /**
+     * 逐局「开始 → 逐个 whackMole → 用真实打过的 id 结算」。
+     * 旧实现只开多局、从不出手，结算提交写死的 1..20，等于白跑一轮。
+     */
+    private static boolean runAggressiveMode() {
         int totalEnergy = 0;
-        for (GameSession session : sessions) {
+        int playedRounds = 0;
+        int hitTotal = 0;
+        for (int roundNum = 1; roundNum <= totalGames; roundNum++) {
+            GameSession session = startSingleRound(roundNum);
+            if (session == null) {
+                // 开不了下一局（次数用尽/接口失败）：剩余轮次不再尝试
+                break;
+            }
+            long roundStart = System.currentTimeMillis();
+            List<Long> hitIds = whackRound(session);
+            hitTotal += hitIds.size();
             try {
-                Thread.sleep(200); // 结算间隔
-                totalEnergy += settleStandardRound(session);
+                // 单局 6 秒：打得太快就补足剩余时长，否则结算时这局还没结束
+                long sleepTime = ROUND_DURATION_MS - (System.currentTimeMillis() - roundStart);
+                if (sleepTime > 0) {
+                    Thread.sleep(sleepTime);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
-                Log.printStackTrace("结算第" + session.getRoundNumber() + "局异常:", e);
+            }
+            totalEnergy += settleStandardRound(session, hitIds);
+            playedRounds++;
+            Log.i(TAG + ".round", "第" + roundNum + "局：可打" + session.getMoleIds().size()
+                    + "个，击中" + hitIds.size() + "个");
+        }
+        if (playedRounds > 0) {
+            Log.forest("森林能量⚡️[激进模式" + playedRounds + "局/打" + hitTotal + "个#总计" + totalEnergy + "g]");
+            if (totalEnergy > 0) {
+                Statistics.addData(Statistics.DataType.COLLECTED, totalEnergy);
+                Statistics.save();
             }
         }
-        Log.forest("森林能量⚡️[激进模式" + sessions.size() + "局#总计" + totalEnergy + "g]");
-        if (totalEnergy > 0) {
-            Statistics.addData(Statistics.DataType.COLLECTED, totalEnergy);
-            Statistics.save();
-        }
+        // 次数用尽也算完成；一局都没开成则返回 false，留给下一轮重试
+        return playedRounds > 0 || Status.hasFlagToday(EXEC_FLAG);
     }
-    
+
     /**
-     * 启动单局游戏（激进模式）
+     * 启动单局游戏（激进模式），同时解析本局地鼠列表供逐只击打
      */
     private static GameSession startSingleRound(int round) {
         try {
@@ -296,27 +291,74 @@ public class WhackMole {
             if (!MessageUtil.checkSuccess(TAG, startResp)) {
                 return null;
             }
-            
-            // 检查今日是否可玩
             if (!startResp.optBoolean("canPlayToday", true)) {
                 Status.flagToday(EXEC_FLAG);
-                throw new InterruptedException("今日打地鼠次数已达上限");
+                Log.record("森林能量⏭️打地鼠今日次数已用完");
+                return null;
             }
-            
-            String token = startResp.optString("token");
-            return new GameSession(token, round);
+            String token = startResp.optString("token", "");
+            if (token.isEmpty()) {
+                Log.i(TAG + ".start", "第" + round + "局未返回 token");
+                return null;
+            }
+            JSONArray moleInfo = startResp.optJSONArray("moleInfo");
+            List<Long> moleIds = new ArrayList<>();
+            if (moleInfo != null) {
+                for (int i = 0; i < moleInfo.length(); i++) {
+                    JSONObject mole = moleInfo.optJSONObject(i);
+                    if (mole == null) {
+                        continue;
+                    }
+                    long moleId = mole.optLong("id", 0L);
+                    if (moleId > 0) {
+                        moleIds.add(moleId);
+                    }
+                }
+            }
+            if (moleIds.isEmpty()) {
+                Log.i(TAG + ".start", "第" + round + "局未返回 moleInfo");
+                return null;
+            }
+            return new GameSession(token, round, moleIds);
         } catch (Exception e) {
             Log.printStackTrace("启动第" + round + "局异常:", e);
             return null;
         }
     }
-    
+
+    /** 逐只击打本局地鼠，返回服务端确认成功的 id（结算只能提交这些） */
+    private static List<Long> whackRound(GameSession session) {
+        List<Long> moleIds = session.getMoleIds();
+        int limit = moleCount > 0 ? Math.min(moleCount, moleIds.size()) : moleIds.size();
+        List<Long> hitIds = new ArrayList<>(limit);
+        for (int i = 0; i < limit; i++) {
+            long moleId = moleIds.get(i);
+            try {
+                JSONObject jo = new JSONObject(AntForestRpcCall.whackMole(moleId, session.getToken(), SOURCE));
+                if (jo.optBoolean("success") || jo.optBoolean("isSuccess")) {
+                    hitIds.add(moleId);
+                }
+            } catch (Throwable t) {
+                // 单只失败不影响其余地鼠
+            }
+        }
+        return hitIds;
+    }
+
     /**
-     * 结算单局游戏（激进模式）
+     * 结算单局游戏（激进模式）：只提交真正打中的 id
      */
-    private static int settleStandardRound(GameSession session) {
+    private static int settleStandardRound(GameSession session, List<Long> hitIds) {
+        if (hitIds.isEmpty()) {
+            Log.i(TAG + ".settlement", "第" + session.getRoundNumber() + "局没有击中地鼠，跳过结算");
+            return 0;
+        }
         try {
-            String respStr = AntForestRpcCall.settlementWhackMole(session.getToken());
+            List<String> ids = new ArrayList<>(hitIds.size());
+            for (Long id : hitIds) {
+                ids.add(String.valueOf(id));
+            }
+            String respStr = AntForestRpcCall.settlementWhackMole(session.getToken(), ids, SOURCE);
             JSONObject resp = new JSONObject(respStr);
             if (MessageUtil.checkSuccess(TAG, resp)) {
                 return resp.optInt("totalEnergy", 0);
