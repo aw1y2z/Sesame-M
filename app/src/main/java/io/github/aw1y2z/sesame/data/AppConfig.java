@@ -38,6 +38,13 @@ public class AppConfig {
     private Boolean enableGoldenBeansLog = true;
     private Boolean enableFarmLog = true;
     private Boolean enableOtherLog = true;
+    /**
+     * 抓包记录。
+     * <p>同时充当 /debugHandler（PC 调用任意 RPC）的门禁：两者都是调试专用、默认关闭，
+     * 且实际使用场景高度重合（要调 RPC 的人本来就要抓包），合并成一个开关避免用户维护两个「调试」开关。
+     * <p>⚠ 若将来这个开关面向普通用户开放，必须拆出独立的执行开关——
+     * 否则「多记点日志」会顺带变成「开放远程执行」。
+     */
     private Boolean enableDebugLog = false;
     private Boolean enableViewErrorLog = true;
     private Boolean enableViewRuntimeLog = true;

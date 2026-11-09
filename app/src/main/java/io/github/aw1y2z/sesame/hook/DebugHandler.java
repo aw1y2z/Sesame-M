@@ -18,6 +18,18 @@ public class DebugHandler extends io.github.aw1y2z.sesame.hook.BaseHandler {
     public DebugHandler(String secretToken) {
         super(secretToken);
     }
+
+    /** 任意 RPC 转发是最危险的入口：令牌之外还要求用户在模块 App 显式开启「调试接口」 */
+    @Override
+    protected boolean requiresEnableSwitch() {
+        return true;
+    }
+
+    @Override
+    protected String enableSwitchTip() {
+        // 门禁绑的是「抓包记录」，文案必须点名它，否则用户看到 403 无从排查
+        return "调试接口未开启：请在模块 App 设置页开启「抓包记录」";
+    }
     
     /**
      * 重写POST请求处理逻辑（核心业务逻辑）

@@ -3,6 +3,7 @@ package io.github.aw1y2z.sesame.hook;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import fi.iki.elonen.NanoHTTPD;
+import io.github.aw1y2z.sesame.data.AppConfig;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,7 +38,13 @@ public abstract class BaseHandler implements io.github.aw1y2z.sesame.hook.HttpHa
             if (!verifyToken(session)) {
                 return unauthorized();
             }
-            
+
+            // 1.5 功能门禁：高危路由需用户显式开启调试（由子类声明，基类不判断具体路径）。
+            // 复用「抓包记录」而非独立开关：它是调试专用、默认关闭，与 /debugHandler 的使用场景重合
+            if (requiresEnableSwitch() && !Boolean.TRUE.equals(AppConfig.INSTANCE.getEnableDebugLog())) {
+                return forbidden(enableSwitchTip());
+            }
+
             // 2. 根据请求方法分发处理
             NanoHTTPD.Method method = session.getMethod();
             if (method == NanoHTTPD.Method.GET) {
@@ -58,6 +65,20 @@ public abstract class BaseHandler implements io.github.aw1y2z.sesame.hook.HttpHa
         }
     }
     
+    /**
+     * 该路由是否还需要「用户显式开启」这道门禁（默认不需要）。
+     * <p>声明式钩子而不是在基类里按 uri 判断：路由知识不应塞进基类，子类覆写即可，
+     * 未覆写的路由行为完全不变。
+     */
+    protected boolean requiresEnableSwitch() {
+        return false;
+    }
+
+    /** 门禁未开启时的提示文案，由需要的子类覆写 */
+    protected String enableSwitchTip() {
+        return "功能未开启";
+    }
+
     private boolean verifyToken(NanoHTTPD.IHTTPSession session) {
         return verifyToken(secretToken, session);
     }
@@ -170,6 +191,18 @@ public abstract class BaseHandler implements io.github.aw1y2z.sesame.hook.HttpHa
         Map<String, String> data = new HashMap<>();
         data.put("status", "unauthorized");
         return json(NanoHTTPD.Response.Status.UNAUTHORIZED, data);
+    }
+
+    /**
+     * 构建403 Forbidden的JSON响应（令牌正确但功能未开启）
+     * @param message 提示信息，需说明去哪儿开启
+     * @return HTTP响应
+     */
+    protected NanoHTTPD.Response forbidden(String message) {
+        Map<String, String> data = new HashMap<>();
+        data.put("status", "forbidden");
+        data.put("message", message);
+        return json(NanoHTTPD.Response.Status.FORBIDDEN, data);
     }
     
     /**

@@ -13,6 +13,8 @@ import java.util.Map;
  * 对应原Kotlin的ModuleHttpServer，保留所有路由注册和请求处理逻辑
  */
 public class ModuleHttpServer extends NanoHTTPD {
+    /** 请求体上限：本机接口最大的请求是 RPC 参数，1 MB 足够；超过直接拒读，避免按声明的长度分配内存 */
+    private static final int MAX_BODY_BYTES = 1024 * 1024;
     private final String tag = "ModuleHttpServer";
     private final Map<String, HttpHandler> routes = new HashMap<>();
     
@@ -82,9 +84,14 @@ public class ModuleHttpServer extends NanoHTTPD {
         // 匹配路由，无匹配则返回404
         HttpHandler handler = routes.get(uri);
         if (handler == null) {
+            // 404 只进调试日志：本机任意应用扫描回环端口就会产生大量 404，
+            // 写进运行日志会刷爆文件，而且它不构成「有人拿错令牌敲门」这类审计信号
+            Log.i("http 404 " + uri);
             return notFound();
         }
-        
+
+        long startAt = System.currentTimeMillis();
+        Response response;
         try {
             // 仅POST/PUT请求读取Body
             String body = null;
@@ -93,12 +100,34 @@ public class ModuleHttpServer extends NanoHTTPD {
                 body = getPostBodySafe(session);
             }
             // 调用处理器处理请求
-            return handler.handle(session, body);
-        } catch (Exception e) {
-            // 全局异常捕获，防止服务器崩溃
+            response = handler.handle(session, body);
+        } catch (Throwable e) {
+            // 捕获 Throwable 而不仅是 Exception：这里要兜住 OutOfMemoryError 等 Error，
+            // 否则会穿透到 NanoHTTPD 的请求线程，直接把宿主进程带走
             Log.printStackTrace("Server Error on " + uri, e);
             String errorMsg = "Internal Server Error: " + (e.getMessage() != null ? e.getMessage() : "Unknown error");
-            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, ServerCommon.MIME_PLAINTEXT, errorMsg);
+            response = newFixedLengthResponse(Response.Status.INTERNAL_ERROR, ServerCommon.MIME_PLAINTEXT, errorMsg);
+        }
+        logAccess(uri, response, System.currentTimeMillis() - startAt);
+        return response;
+    }
+
+    /**
+     * 访问日志分级：401/403（有人在敲门、功能未开启）与 5xx（故障）记入运行日志，
+     * 2xx 只进调试日志——PC 轮询时 200 会持续产生，写进运行日志会把真正有用的行挤掉。
+     */
+    private void logAccess(String uri, Response response, long costMs) {
+        try {
+            int status = response.getStatus() != null ? response.getStatus().getRequestStatus() : 0;
+            String line = "http " + status + " " + uri + " " + costMs + "ms";
+            if (status >= 200 && status < 300) {
+                Log.i(line);
+            } else {
+                Log.record(line);
+            }
+        } catch (Throwable t) {
+            // 记日志本身不能影响响应返回
+            Log.printStackTrace("logAccess", t);
         }
     }
     
@@ -128,6 +157,12 @@ public class ModuleHttpServer extends NanoHTTPD {
         if (contentLength == 0) {
             return "";
         }
+        // 未鉴权的请求也会走到这里：按声明的长度直接分配内存，Content-Length 写多大就申请多大，
+        // 单条请求即可打爆堆。超过上限一律不读，交由上层按空 body 处理
+        if (contentLength < 0 || contentLength > MAX_BODY_BYTES) {
+            Log.i(tag, "拒绝超限请求体: " + contentLength);
+            return null;
+        }
         
         try {
             byte[] buffer = new byte[contentLength];
@@ -139,7 +174,8 @@ public class ModuleHttpServer extends NanoHTTPD {
         } catch (IOException e) {
             Log.printStackTrace("Failed to read body", e);
             return null;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // 含 OutOfMemoryError：读失败只让本条请求失败，不能穿透到请求线程
             Log.printStackTrace("Error reading body fully", e);
             return null;
         }
