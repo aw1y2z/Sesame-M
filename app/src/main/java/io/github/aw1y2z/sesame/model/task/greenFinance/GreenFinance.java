@@ -77,27 +77,43 @@ public class GreenFinance extends ModelTask {
                 Log.i(TAG, jo.optString("resultDesc"));
                 return;
             }
-            JSONObject result = jo.getJSONObject("result");
-            if (!result.getBoolean("greenFinanceSigned")) {
+            JSONObject result = jo.optJSONObject("result");
+            if (result == null) {
+                Log.i(TAG + ".index", "响应缺少 result");
+                return;
+            }
+            if (!result.optBoolean("greenFinanceSigned", false)) {
                 Log.i("绿色经营📊未开通");
                 return;
             }
-            JSONObject mcaGreenLeafResult = result.getJSONObject("mcaGreenLeafResult");
-            JSONArray greenLeafList = mcaGreenLeafResult.getJSONArray("greenLeafList");
-            String currentCode = "";
-            JSONArray bsnIds = new JSONArray();
-            for (int i = 0; i < greenLeafList.length(); i++) {
-                JSONObject greenLeaf = greenLeafList.getJSONObject(i);
-                String code = greenLeaf.getString("code");
-                if (currentCode.equals(code) || bsnIds.length() == 0) {
-                    bsnIds.put(greenLeaf.getString("bsnId"));
-                } else {
-                    batchSelfCollect(bsnIds);
-                    bsnIds = new JSONArray();
+            // 缺字段只跳过收集:这里抛出去会把下面的签到/打卡/捐助一起跳过
+            JSONObject mcaGreenLeafResult = result.optJSONObject("mcaGreenLeafResult");
+            JSONArray greenLeafList = mcaGreenLeafResult == null ? null : mcaGreenLeafResult.optJSONArray("greenLeafList");
+            if (greenLeafList != null) {
+                // 同 code 的叶子合并成一批收取;code 变化时先提交上一批,再开始新的一批
+                JSONArray bsnIds = new JSONArray();
+                String currentCode = null;
+                for (int i = 0; i < greenLeafList.length(); i++) {
+                    JSONObject greenLeaf = greenLeafList.optJSONObject(i);
+                    if (greenLeaf == null) {
+                        continue;
+                    }
+                    String code = greenLeaf.optString("code", "");
+                    if (!code.equals(currentCode)) {
+                        if (bsnIds.length() > 0) {
+                            batchSelfCollect(bsnIds);
+                        }
+                        bsnIds = new JSONArray();
+                        currentCode = code;
+                    }
+                    String bsnId = greenLeaf.optString("bsnId", "");
+                    if (!bsnId.isEmpty()) {
+                        bsnIds.put(bsnId);
+                    }
                 }
-            }
-            if (bsnIds.length() > 0) {
-                batchSelfCollect(bsnIds);
+                if (bsnIds.length() > 0) {
+                    batchSelfCollect(bsnIds);
+                }
             }
         } catch (Throwable th) {
             Log.err(TAG, "index err:", th);
