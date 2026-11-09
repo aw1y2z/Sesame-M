@@ -2394,7 +2394,8 @@ public class AntForestV2 extends ModelTask {
                         String signKey = signRecord.getString("signKey");
                         if (signKey.equals(currentSignKey)) {
                             if (!signRecord.getBoolean("signed")) {
-                                JSONObject resData2 = new JSONObject(AntForestRpcCall.antiepSign(signId, "ANTFOREST_ENERGY_SIGN", UserIdMap.getCurrentUid()));
+                                // antiepSign(entityId, userId, sceneCode)：原实现把 userId 与 sceneCode 传反，接口必然失败
+                                JSONObject resData2 = new JSONObject(AntForestRpcCall.antiepSign(signId, UserIdMap.getCurrentUid(), "ANTFOREST_ENERGY_SIGN"));
                                 if (MessageUtil.checkSuccess(TAG, resData2)) {
                                     int expiredEnergy = signRecord.getInt("awardCount");
                                     Log.forest("过期能量💊[" + expiredEnergy + "g]");
@@ -2568,6 +2569,12 @@ public class AntForestV2 extends ModelTask {
 
     // skuId, sku
     Map<String, JSONObject> skuInfo = new HashMap<>();
+
+    /**
+     * 最近一次清单拉取是否完整：有分类请求失败即为 false。
+     * 不完整时不能把缺失的 skuId 判为「已下架」，否则一次网络抖动会把配置里的兑换项全部拉黑。
+     */
+    private boolean skuListComplete = false;
 
     private void vitalityExchangeBenefit() {
         try {
@@ -3247,7 +3254,8 @@ public class AntForestV2 extends ModelTask {
             for (int i = 0; i < bubbleEnergyList.length(); i++) {
                 sum += bubbleEnergyList.getInt(i);
             }
-            TimeUtil.sleep(5000L);
+            // 结算参数无点击轨迹，时长是唯一能体现不是机器的特征，故随机化
+            TimeUtil.sleep(5000L + (long) (Math.random() * 5000L));
             jo = new JSONObject(AntForestRpcCall.energyRainSettlement(sum, token));
             if (!MessageUtil.checkResultCode(TAG, jo)) {
                 return -1;
@@ -3390,6 +3398,8 @@ public class AntForestV2 extends ModelTask {
                     // 开局/结算失败：额度没消耗掉，再问也是同样结果，直接交给下一轮
                     return;
                 }
+                // 局间留随机间隔，否则连续开局是明显的机器节奏
+                TimeUtil.sleep(1000L + (long) (Math.random() * 4000L));
             }
         } catch (Throwable th) {
             Log.err(TAG, "drainEnergyRainQuota err:", th);
@@ -4418,8 +4428,15 @@ public class AntForestV2 extends ModelTask {
 
     private void queryUserPatrol() {
         try {
+            // 换图/走路/兑换都用 continue 回到循环头，原本没有任何终止条件：
+            // 服务端状态不前进时会一直重发，整轮卡死且后面任务全不执行
+            int loopCount = 0;
             th:
             do {
+                if (++loopCount > 20) {
+                    Log.i(TAG, "巡护⚖️循环超过上限，本轮停止");
+                    break;
+                }
                 JSONObject jo = new JSONObject(AntForestRpcCall.queryUserPatrol());
                 TimeUtil.sleep(500);
                 if (!MessageUtil.checkResultCode(TAG, jo)) {
@@ -4449,8 +4466,11 @@ public class AntForestV2 extends ModelTask {
                                 TimeUtil.sleep(500);
                                 if (MessageUtil.checkResultCode(TAG, resData)) {
                                     Log.i("巡护⚖️-切换地图至" + patrolId);
+                                    continue th;
                                 }
-                                continue th;
+                                // 切换失败还 continue 会无限重发同一张图：直接结束本轮巡护
+                                Log.i(TAG, "巡护⚖️切换地图失败，本轮停止");
+                                break th;
                             }
                             break;
                         }
@@ -5460,7 +5480,11 @@ public class AntForestV2 extends ModelTask {
      */
     private boolean getAllSkuInfo() {
         try {
-            if (Status.hasFlagToday("forest::vitalitySkuList")) {
+            // 当日标记只管「今天拉过」；本进程内存里的清单为空（如进程重启）时必须重拉，
+            // 否则调用方会把配置里的每个 skuId 都当成失效并当天拉黑
+            if (Status.hasFlagToday("forest::vitalitySkuList") && !skuInfo.isEmpty()) {
+                // 当日标记只在完整拉取后才落盘，命中即代表清单完整；不同步会让失效 skuId 的去重路径失效
+                skuListComplete = true;
                 return true;
             }
             // 失败重试上限：服务端持续失败时避免每轮都重拉（单轮最多 5 分类 × 10 页）
@@ -5468,12 +5492,14 @@ public class AntForestV2 extends ModelTask {
             if (retries >= VITALITY_SKU_RETRY_MAX) {
                 return false;
             }
+            boolean complete = true;
             int got = 0;
             for (String labelType : VITALITY_LABEL_TYPES) {
                 int cnt = 0;
                 for (int page = 0; page < VITALITY_ITEM_MAX_PAGES; page++) {
                     JSONObject jo = new JSONObject(AntForestRpcCall.itemList(labelType, page * AntForestRpcCall.VITALITY_ITEM_PAGE_SIZE));
                     if (!MessageUtil.checkSuccess(TAG, jo)) {
+                        complete = false;
                         break;
                     }
                     JSONArray itemInfoVOList = optItemInfoVOList(jo);
@@ -5481,8 +5507,14 @@ public class AntForestV2 extends ModelTask {
                         break;
                     }
                     for (int i = 0; i < itemInfoVOList.length(); i++) {
-                        getSkuInfoByItemInfoVO(itemInfoVOList.getJSONObject(i));
-                        cnt++;
+                        JSONObject spuItem = itemInfoVOList.optJSONObject(i);
+                        if (spuItem == null) {
+                            continue;
+                        }
+                        // 只统计真正入表的条数：解析失败不该被当成「拉到了」
+                        if (getSkuInfoByItemInfoVO(spuItem)) {
+                            cnt++;
+                        }
                     }
                     if (!hasMore(jo)) {
                         break;
@@ -5493,15 +5525,25 @@ public class AntForestV2 extends ModelTask {
             }
             VitalityBenefitIdMap.save(UserIdMap.getCurrentUid());
             Log.i("活力值商店列表：共取" + got + "条，清单共" + VitalityBenefitIdMap.getMap().size() + "条");
+            skuListComplete = got > 0 && complete;
             if (got > 0) {
-                // 拉到了才打当日标记；拉不到留给下一轮重试
-                Status.flagToday("forest::vitalitySkuList");
+                if (complete) {
+                    // 完整拉到才打当日标记：部分分类失败时打标会把残缺清单固化一整天
+                    Status.flagToday("forest::vitalitySkuList");
+                } else {
+                    // 清单残缺：清掉可能残留的旧当日标记（升级前旧逻辑 got>0 就置标记），否则下一轮
+                    // 早退分支会把这份残缺清单当成「完整」并置 skuListComplete，缺失的 skuId 就会被整天拉黑
+                    Status.clearFlag("forest::vitalitySkuList");
+                    // 计入重试次数留待下一轮；达到上限后本方法返回 false，调用方据此不判 skuId 失效
+                    accountVitalitySkuRetry();
+                }
                 return true;
             }
             accountVitalitySkuRetry();
             return false;
         } catch (Throwable th) {
             Log.err(TAG, "getAllSkuInfo err:", th);
+            skuListComplete = false;
             accountVitalitySkuRetry();
             return false;
         }
@@ -5551,23 +5593,52 @@ public class AntForestV2 extends ModelTask {
         }
     }
 
-    /** 单个 SPU 的 SKU 入表；落盘由调用方整批结束后统一 save，避免逐条写文件 */
-    private void getSkuInfoByItemInfoVO(JSONObject spuItem) {
+    /**
+     * 单个 SPU 的 SKU 入表；落盘由调用方整批结束后统一 save，避免逐条写文件。
+     *
+     * @return 是否至少入表一个 SKU——调用方据「成功条数」判是否拉到了清单，
+     * 否则解析全失败也会被当成成功、打上当日标记
+     */
+    private boolean getSkuInfoByItemInfoVO(JSONObject spuItem) {
         try {
-            String spuId = spuItem.getString("spuId");
-            JSONArray skuModelList = spuItem.getJSONArray("skuModelList");
+            String spuId = spuItem.optString("spuId");
+            if (spuId.isEmpty()) {
+                return false;
+            }
+            JSONArray skuModelList = spuItem.optJSONArray("skuModelList");
+            if (skuModelList == null || skuModelList.length() == 0) {
+                return false;
+            }
+            int added = 0;
             for (int i = 0; i < skuModelList.length(); i++) {
-                JSONObject skuModel = skuModelList.getJSONObject(i);
-                String skuId = skuModel.getString("skuId");
-                String skuName = skuModel.getString("skuName");
+                JSONObject skuModel = skuModelList.optJSONObject(i);
+                if (skuModel == null) {
+                    continue;
+                }
+                String skuId = skuModel.optString("skuId");
+                String skuName = skuModel.optString("skuName");
+                if (skuId.isEmpty()) {
+                    continue;
+                }
                 if (!skuModel.has("spuId")) {
                     skuModel.put("spuId", spuId);
                 }
                 skuInfo.put(skuId, skuModel);
                 VitalityBenefitIdMap.add(skuId, skuName);
+                added++;
             }
+            return added > 0;
         } catch (Throwable th) {
             Log.err(TAG, "getSkuInfoByItemInfoVO err:", th);
+            return false;
+        }
+    }
+
+    /** 清单不可用时的过程日志：每天只提示一次，避免每轮刷屏（不计动作数，也不打 skuId 失效标记） */
+    private static void warnSkuListUnavailableOnce() {
+        if (!Status.hasFlagToday("forest::vitalitySkuListWarn")) {
+            Log.i(TAG, "活力兑换⏭️商品清单未取到，本轮跳过（不判定 skuId 失效）");
+            Status.flagToday("forest::vitalitySkuListWarn");
         }
     }
 
@@ -5578,13 +5649,19 @@ public class AntForestV2 extends ModelTask {
      * exchangedCount == 0......
      */
     private Boolean exchangeBenefit(String skuId) {
-        if (skuInfo.isEmpty()) {
+        // 清单为空、或上次只拉到一部分，都要重拉：残缺清单会漏掉配置里的 skuId
+        if (skuInfo.isEmpty() || !skuListComplete) {
             getAllSkuInfo();
         }
         JSONObject sku = skuInfo.get(skuId);
         if (sku == null) {
-            // 失效 skuId（权益下架/换号/服务端改 ID）：打当日标记，当天不再重试；
-            // 否则每轮都会遍历到它并刷一条日志，既刷屏又拖累后续任务
+            // 清单没取到或没取全（拉取失败、当日标记命中但内存为空）：无法判定 skuId 是否失效，
+            // 不能拉黑，否则配置里的每项都会被当天判死，整天只刷「找不到要兑换的权益」
+            if (skuInfo.isEmpty() || !skuListComplete) {
+                warnSkuListUnavailableOnce();
+                return false;
+            }
+            // 清单完整且不含该 skuId：失效 skuId（权益下架/换号/服务端改 ID），打当日标记当天不再重试
             if (!Status.hasFlagToday("forest::exchangeSkuMissing::" + skuId)) {
                 Log.record("活力兑换🎐找不到要兑换的权益！" + skuId + "#今日不再重试");
                 Status.flagToday("forest::exchangeSkuMissing::" + skuId);
