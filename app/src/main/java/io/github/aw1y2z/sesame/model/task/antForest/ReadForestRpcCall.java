@@ -198,9 +198,9 @@ public final class ReadForestRpcCall {
     }
 
     private static String request(String method, String path, String body, String token, String referer) throws Exception {
-        HttpURLConnection conn = null;
+        HttpURLConnection conn = (HttpURLConnection) new URL(HOST + path).openConnection();
+        boolean completed = false;
         try {
-            conn = (HttpURLConnection) new URL(HOST + path).openConnection();
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(20000);
             conn.setRequestMethod(method);
@@ -218,6 +218,7 @@ public final class ReadForestRpcCall {
             }
             InputStream is = conn.getResponseCode() >= 400 ? conn.getErrorStream() : conn.getInputStream();
             if (is == null) {
+                completed = true;
                 return "";
             }
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -227,9 +228,12 @@ public final class ReadForestRpcCall {
                 baos.write(buffer, 0, len);
             }
             is.close();
+            completed = true;
             return baos.toString("UTF-8");
         } finally {
-            if (conn != null) {
+            // 正常读完不 disconnect：连接会回到 keep-alive 池，相邻请求接着复用，省掉每请求一次 TLS 握手。
+            // 只有异常中断的连接不可复用，此时必须断开，否则一直占着句柄。
+            if (!completed) {
                 conn.disconnect();
             }
         }
