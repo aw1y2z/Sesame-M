@@ -25,19 +25,23 @@ import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
  * 由同一个 AntMember.run() 先后跑两遍（会员 + 广告），从而成为两个互相隔离的执行路径，
  * 各自有独立的开关与黑名单配置，但配置页只出现一块「会员任务」。
  * <p><b>取数去重</b>：两类共用同一次 RPC 取数结果（静态缓存 + 每轮 TTL），避免同一账号同时开启两类时
- * 每轮重复请求 signPageTaskList / queryAllStatusTaskList 加重风控；列表取不到(风控/1009)时写入
+ * 每轮重复请求 signPageTaskList / queryAllStatusTaskList 加重风控；列表连续多次取不到时写入
  * 共享的当日标记，两条路径一同跳过、当日不再重试。
  */
 public abstract class BaseAntMember extends ModelTask {
 
     protected final String TAG = getClass().getSimpleName();
 
-    /** 两个类共享的当日失败标记：列表取不到(风控/1009)即置位，后续轮次两条路径一起跳过，不再发 RPC */
+    /** 两个类共享的当日失败标记：取数连续失败到上限才置位，之后两条路径一起跳过、不再发 RPC */
     private static final String FLAG_SIGN_PAGE_TASK_FAILED = "MemberTask::signPageTaskListFailed";
 
     /** 两个类共享的当日"任务已完成"标记：列表为空(当天无可做任务)即置位，后续轮次跳过，不再发 RPC */
     private static final String FLAG_SIGN_PAGE_TASK_DONE = "MemberTask::signPageTaskListDone";
     private static final String FLAG_QUERY_ALL_TASK_DONE = "MemberTask::queryAllStatusTaskListDone";
+
+    /** 当日取数失败计数：连续失败到上限才落上面的标记，一次抖动不再废掉整天 */
+    private static final String INT_FLAG_SIGN_PAGE_FETCH_FAIL = "MemberTask::signPageTaskListFetchFail";
+    private static final int MAX_FETCH_FAILURES = 3;
 
     /** 共享取数缓存：同一账号、TTL 内只真正取一次 */
     private static final long CACHE_TTL = 60_000L;
@@ -152,8 +156,12 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject jo = new JSONObject(rawJson);
             TimeUtil.sleep(500);
             if (!MessageUtil.checkResultCode(TAG + " signPageTaskList", jo)) {
-                Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+                handleFetchFailure("接口返回失败");
                 return null;
+            }
+            // 成功后清掉计数：只有「连续」失败才按风控处理，零星失败不该累积
+            if (Status.getIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL) > 0) {
+                Status.setIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL, 0);
             }
             // 成功响应即缓存(即使任务列表为空)，确保广告路径复用、不再重复请求；空列表由 process 处理
             cacheUid = uid;
@@ -162,8 +170,24 @@ public abstract class BaseAntMember extends ModelTask {
             return jo;
         } catch (Throwable t) {
             Log.err(TAG, "signPageTaskList err:", t);
-            Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+            handleFetchFailure("请求异常");
             return null;
+        }
+    }
+
+    /**
+     * 取数失败的处置。
+     * <p>原实现「取不到列表就置当日标记」，一次网络抖动或服务端繁忙(102)就让会员任务与广告任务
+     * 整天停摆；改为累计到上限才停手，既给临时失败留重试机会，也避免一直撞风控。
+     */
+    private void handleFetchFailure(String reason) {
+        int failures = Status.getIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL) + 1;
+        Status.setIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL, failures);
+        if (failures >= MAX_FETCH_FAILURES) {
+            Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+            Log.record("会员任务⏭️任务列表连续" + failures + "次获取失败(" + reason + ")，今日不再重试");
+        } else {
+            Log.i(TAG, "任务列表获取失败(" + reason + ")，第" + failures + "/" + MAX_FETCH_FAILURES + "次，稍后重试");
         }
     }
 
