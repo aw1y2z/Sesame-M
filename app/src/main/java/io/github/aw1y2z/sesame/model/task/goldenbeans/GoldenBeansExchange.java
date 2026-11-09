@@ -49,11 +49,11 @@ public final class GoldenBeansExchange {
             int beanReward = info.optInt("beanReward", 1);
 
             if (!farmOpened || !pageOpened || !taobaoBinding) {
-                Log.record("金豆换豆⚠️资格未满足#跳过");
+                Log.i(GoldenBeansSupport.TAG, "金豆换豆⚠️资格未满足#跳过");
                 return;
             }
             if (minExchangeAmount <= 0) {
-                Log.record("金豆换豆⚠️最低兑换量无效#跳过");
+                Log.i(GoldenBeansSupport.TAG, "金豆换豆⚠️最低兑换量无效#跳过");
                 return;
             }
 
@@ -67,11 +67,11 @@ public final class GoldenBeansExchange {
             long availableLong = Math.max(Math.min(serverLimitLong, userRemaining), 0);
             int reserved = (int) Math.min(availableLong, Integer.MAX_VALUE);
             if (reserved <= 0) {
-                Log.record("金豆换豆⏸️可兑换额度不足#跳过");
+                Log.i(GoldenBeansSupport.TAG, "金豆换豆⏸️可兑换额度不足#跳过");
                 return;
             }
             if (reserved < minExchangeAmount) {
-                Log.record("金豆换豆⏸️可兑换[" + reserved + "]低于服务端最低["
+                Log.i(GoldenBeansSupport.TAG, "金豆换豆⏸️可兑换[" + reserved + "]低于服务端最低["
                         + minExchangeAmount + "]#本轮不换");
                 return;
             }
@@ -134,11 +134,11 @@ public final class GoldenBeansExchange {
             // 资格快照（芝麻粒/额度/单日上限等）每轮恒定，属诊断数据；不单独打，
             // 真正兑换成功时才由下方「金豆芝麻粒换豆🎖️…」报告结果
             if (!pageOpened || beanReward <= 0 || minExchangeAmount <= 0) {
-                Log.record("金豆芝麻粒换豆⏸️服务端资格未满足#跳过");
+                Log.i(GoldenBeansSupport.TAG, "金豆芝麻粒换豆⏸️服务端资格未满足#跳过");
                 return;
             }
             if (available < minExchangeAmount) {
-                Log.record("金豆芝麻粒换豆⏸️可兑换[" + available + "]低于服务端最低["
+                Log.i(GoldenBeansSupport.TAG, "金豆芝麻粒换豆⏸️可兑换[" + available + "]低于服务端最低["
                         + minExchangeAmount + "]#本轮不换");
                 return;
             }

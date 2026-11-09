@@ -314,7 +314,7 @@ public final class GoldenBeansTasks {
                         continue;
                     }
                     if (goldenbeansRpcCall.TASK_TYPE_EXCHANGE.equals(taskId)) {
-                        Log.record("金豆[" + entry.alias + "]任务⏭️[" + taskName + "]"
+                        Log.i(GoldenBeansSupport.TAG, "金豆[" + entry.alias + "]任务⏭️[" + taskName + "]"
                                 + (entry == GoldenBeansEntry.ALCHEMY ? "芝麻粒换豆处理" : "肥料换豆处理"));
                         continue;
                     }

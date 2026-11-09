@@ -397,7 +397,7 @@ public class AntOcean extends ModelTask {
             String taskId = "Ocean|" + UserId;
             if (!hasChildTask(taskId)) {
                 addChildTask(new ChildModelTask(taskId, "Ocean", this::queryHomePage, canCleanLaterTime));
-                Log.record("神奇海洋🐳蹲添加蹲点在[" + TimeUtil.getCommonDate(canCleanLaterTime) + "]执行清理海洋");
+                Log.i(TAG + "神奇海洋🐳蹲添加蹲点在[" + TimeUtil.getCommonDate(canCleanLaterTime) + "]执行清理海洋");
             }
         } catch (Throwable t) {
             Log.err(TAG, "queryHomePage err:", t);
@@ -1390,12 +1390,12 @@ public class AntOcean extends ModelTask {
                             String ownerNickName = owner.optString("nickName", "");
                             String ownerUserId = owner.optString("userId", "");
                             if (!ownerNickName.isEmpty()) {
-                                Log.record("海洋摸鱼🐟当前鱼状态["+ fishInteractStatus +"]主人[" + ownerNickName + "](" + ownerUserId + ")");
+                                Log.i(TAG + "海洋摸鱼🐟当前鱼状态["+ fishInteractStatus +"]主人[" + ownerNickName + "](" + ownerUserId + ")");
                             }
                         }
                     }
                 }
-                Log.record("海洋摸鱼🐟当前赛季[" + seasonTitle + "](" + seasonId + ")项目[" + projectName + "](" + region + ")用户[" + nickName + "]鱼状态["+ fishInteractStatus +"]等级[" + fishLevelName + "]可摸鱼"+remainTouchChance+"累计摸" + touchTotal + "累计获得能量" + touchEnergy + "g(总"+energy+"g)");
+                Log.i(TAG + "海洋摸鱼🐟当前赛季[" + seasonTitle + "](" + seasonId + ")项目[" + projectName + "](" + region + ")用户[" + nickName + "]鱼状态["+ fishInteractStatus +"]等级[" + fishLevelName + "]可摸鱼"+remainTouchChance+"累计摸" + touchTotal + "累计获得能量" + touchEnergy + "g(总"+energy+"g)");
                 //鱼被困了，解救鱼
                 if("CAPTURED".equals(fishInteractStatus)){
                     rescueFish();
@@ -1478,6 +1478,9 @@ public class AntOcean extends ModelTask {
      * <p>一次列表可批量评价：列表每页约 10 条，逐条评完再重拉，避免每条都拉一次列表。
      */
     private void antfishAppraiseFish() {
+        if (Status.hasFlagToday("Ocean::FISH_APPRAISE_LIMIT")) {
+            return;
+        }
         try {
             int totalEnergy = 0;
             int count = 0;
@@ -1491,6 +1494,7 @@ public class AntOcean extends ModelTask {
                 }
                 // 剩余可评价次数：0 表示今日上限已到
                 if (jo.optInt("appraiseRewardRemainNum", -1) == 0) {
+                    Status.flagToday("Ocean::FISH_APPRAISE_LIMIT");
                     break;
                 }
                 JSONArray fishList = jo.optJSONArray("fishList");
@@ -1527,6 +1531,7 @@ public class AntOcean extends ModelTask {
                     }
                     // rightsNums 是字符串，按字符串取再转数值
                     JSONArray rewardList = appraiseJo.optJSONArray("appraiseRewardList");
+                    int energyThis = 0;
                     for (int j = 0; rewardList != null && j < rewardList.length(); j++) {
                         JSONObject reward = rewardList.optJSONObject(j);
                         if (reward == null) {
@@ -1537,14 +1542,21 @@ public class AntOcean extends ModelTask {
                         if (popup != null) {
                             Integer nums = StringUtil.parseIntOrNull(popup.optString("rightsNums", "0"));
                             if (nums != null) {
-                                totalEnergy += nums;
+                                energyThis += nums;
                             }
                         }
                     }
+                    totalEnergy += energyThis;
                     count++;
                     appraisedAny = true;
+                    // 点了却没有奖励：今日已满额，立即停手（此时服务端仍会返回可评的鱼）
+                    if (energyThis == 0) {
+                        Status.flagToday("Ocean::FISH_APPRAISE_LIMIT");
+                        break outer;
+                    }
                     // 上限归零则本轮结束，不必再翻下一页
                     if (appraiseJo.optInt("appraiseRewardRemainNum", -1) == 0) {
+                        Status.flagToday("Ocean::FISH_APPRAISE_LIMIT");
                         break outer;
                     }
                     TimeUtil.sleep(1000);
@@ -1554,7 +1566,11 @@ public class AntOcean extends ModelTask {
                     break;
                 }
             }
-            if (count > 0) {
+            if (count > 0 && totalEnergy == 0) {
+                // 点赞成功却无奖励：服务端剩余次数并未归零，仍会推出可评的鱼，据此认定今日已满额
+                Status.flagToday("Ocean::FISH_APPRAISE_LIMIT");
+                Log.i(TAG + "点赞摸鱼：今日已达上限（本轮点" + count + "次无奖励）");
+            } else if (count > 0) {
                 Log.other("海洋摸鱼🎖️点赞[" + count + "]次共获得" + totalEnergy + "g能量");
             } else {
                 Log.i(TAG + "点赞摸鱼：今日无可点赞次数");

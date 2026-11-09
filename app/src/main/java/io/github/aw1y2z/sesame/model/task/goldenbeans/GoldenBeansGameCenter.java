@@ -93,9 +93,9 @@ public final class GoldenBeansGameCenter {
 
                 if (candidate == null) {
                     if (quotaLimit > 0 && usedQuota >= quotaLimit) {
-                        Log.record("金豆乐园🎰今日次数已用尽[" + usedQuota + "/" + quotaLimit + "]");
+                        Log.i(GoldenBeansSupport.TAG, "金豆乐园🎰今日次数已用尽[" + usedQuota + "/" + quotaLimit + "]");
                     } else {
-                        Log.record("金豆乐园🎰无可自动推进项#次数[" + usedQuota + "/" + quotaLimit + "]");
+                        Log.i(GoldenBeansSupport.TAG, "金豆乐园🎰无可自动推进项#次数[" + usedQuota + "/" + quotaLimit + "]");
                     }
                     return true;
                 }

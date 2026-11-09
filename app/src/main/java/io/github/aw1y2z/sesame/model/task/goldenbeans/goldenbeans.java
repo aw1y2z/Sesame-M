@@ -104,7 +104,7 @@ public class goldenbeans extends ModelTask {
 
             if (!signEnabled && !popupEnabled && !taskEnabled && !gameEnabled
                     && !mineEnabled && !resyncEnabled && !manureEnabled && !sesameEnabled && !mallEnabled) {
-                Log.record("金豆夺宝功能未开启#本轮跳过");
+                Log.i(GoldenBeansSupport.TAG, "金豆夺宝功能未开启#本轮跳过");
                 return;
             }
 
