@@ -45,6 +45,8 @@ public class AntFarm extends ModelTask {
     private static final String FLAG_FAMILY_SHARE_FAIL_COUNT = "antFarm::familyShareToFriends::failCount";
     /** 家庭分享：当日最多尝试几次，超过后当天不再重试（避免每轮任务都重发邀请请求） */
     private static final int MAX_FAMILY_SHARE_ATTEMPT = 3;
+    /** 雇佣NPC：当天已处理过的 NPC 标记前缀（后接枚举名）；农场同时只有一只 NPC，按天标记避免每轮遣返重雇 */
+    private static final String FLAG_HIRE_NPC_DONE = "antFarm::hireNpcDone::";
 
     /**
      * 公益捐蛋当日标记：当天已经捐过一次公益蛋。只归「每日捐蛋」自己用。
@@ -172,8 +174,10 @@ public class AntFarm extends ModelTask {
     private BooleanModelField ornamentsDressUp;
     private SelectModelField ornamentsDressUpList;
     private IntegerModelField ornamentsDressUpDays;
+    private BooleanModelField hireAnimalEnable;
     private ChoiceModelField hireAnimalType;
     private SelectModelField hireAnimalList;
+    private SelectModelField hireNpcList;
     private BooleanModelField drawGameCenterAward;
     private BooleanModelField competition;                    // 爱心鸡结号(S2) | 开启
     private BooleanModelField competitionReceiveTask;          // 爱心鸡结号 | 领取奖励
@@ -206,8 +210,10 @@ public class AntFarm extends ModelTask {
         modelFields.addField(feedAnimal = new BooleanModelField("feedAnimal", "投喂小鸡", false));
         modelFields.addField(feedFriendAnimal = new BooleanModelField("feedFriendAnimal", "帮喂小鸡 | 开启", true));
         modelFields.addField(feedFriendAnimalList = new SelectAndCountModelField("feedFriendAnimalList", "帮喂小鸡 | " + "好友列表", new LinkedHashMap<>(), AlipayUser::getList, "请填写帮喂次数(每日)", 1, 100).setDependsOn("feedFriendAnimal"));
-        modelFields.addField(hireAnimalType = new ChoiceModelField("hireAnimalType", "雇佣小鸡 | 动作", HireAnimalType.NONE, HireAnimalType.nickNames));
+        modelFields.addField(hireAnimalEnable = new BooleanModelField("hireAnimal", "雇佣小鸡 | 开关", false));
+        modelFields.addField(hireAnimalType = new ChoiceModelField("hireAnimalType", "雇佣小鸡 | 动作", HireAnimalType.NONE, HireAnimalType.nickNames).setDependsOn("hireAnimal"));
         modelFields.addField(hireAnimalList = new SelectModelField("hireAnimalList", "雇佣小鸡 | 好友列表", new LinkedHashSet<>(), AlipayUser::getList).setDependsOn("hireAnimalType"));
+        modelFields.addField(hireNpcList = new SelectModelField("hireNpcList", "雇佣小鸡 | NPC选项", new LinkedHashSet<>(), CustomOption::getAntFarmHireNpcOptions).setDependsOn("hireAnimal"));
         modelFields.addField(sendBackAnimalWay = new ChoiceModelField("sendBackAnimalWay", "遣返小鸡 | 方式", SendBackAnimalWay.NORMAL, SendBackAnimalWay.nickNames));
         modelFields.addField(sendBackAnimalType = new ChoiceModelField("sendBackAnimalType", "遣返小鸡 | 动作", SendBackAnimalType.NONE, SendBackAnimalType.nickNames));
         modelFields.addField(sendBackAnimalList = new SelectModelField("sendFriendList", "遣返小鸡 | 好友列表", new LinkedHashSet<>(), AlipayUser::getList).setDependsOn("sendBackAnimalType"));
@@ -488,9 +494,12 @@ public class AntFarm extends ModelTask {
 
             }
 
-            // 雇佣小鸡
-            if (hireAnimalType.getValue() != HireAnimalType.NONE) {
-                hireAnimal();
+            // 雇佣小鸡：NPC 放在好友之后，避免 NPC 计入可雇佣好友的位置数
+            if (hireAnimalEnable.getValue()) {
+                if (hireAnimalType.getValue() != HireAnimalType.NONE) {
+                    hireAnimal();
+                }
+                hireNpc();
             }
             
             /*  注释掉有问题的代码
@@ -984,7 +993,8 @@ public class AntFarm extends ModelTask {
         }
         try {
             for (Animal animal : animals) {
-                if (AnimalInteractStatus.STEALING.name().equals(animal.animalInteractStatus) && !SubAnimalType.GUEST.name().equals(animal.subAnimalType) && !SubAnimalType.WORK.name().equals(animal.subAnimalType)) {
+                // NPC 是雇主自己雇来的，不属于该遣返的偷吃小鸡
+                if (AnimalInteractStatus.STEALING.name().equals(animal.animalInteractStatus) && !SubAnimalType.GUEST.name().equals(animal.subAnimalType) && !SubAnimalType.WORK.name().equals(animal.subAnimalType) && !isNpcAnimal(animal)) {
                     // 赶鸡
                     String user = AntFarmRpcCall.farmId2UserId(animal.masterFarmId);
                     boolean isSendBackAnimal = sendBackAnimalList.getValue().contains(user);
@@ -2441,17 +2451,19 @@ public class AntFarm extends ModelTask {
             for (int i = 0; i < animals.length; i++) {
                 Animal animal = new Animal();
                 JSONObject animalJsonObject = jaAnimals.getJSONObject(i);
-                animal.animalId = animalJsonObject.getString("animalId");
-                animal.currentFarmId = animalJsonObject.getString("currentFarmId");
-                animal.masterFarmId = animalJsonObject.getString("masterFarmId");
-                animal.animalBuff = animalJsonObject.getString("animalBuff");
-                animal.subAnimalType = animalJsonObject.getString("subAnimalType");
-                animal.currentFarmMasterUserId = animalJsonObject.getString("currentFarmMasterUserId");
+                animal.animalId = animalJsonObject.optString("animalId", "");
+                animal.currentFarmId = animalJsonObject.optString("currentFarmId", "");
+                animal.masterFarmId = animalJsonObject.optString("masterFarmId", "");
+                // NPC 条目可能缺字段：一律 opt 取值，避免一只 NPC 中断整段 animals 解析
+                animal.animalBuff = animalJsonObject.optString("animalBuff", "");
+                animal.subAnimalType = animalJsonObject.optString("subAnimalType", "");
+                animal.currentFarmMasterUserId = animalJsonObject.optString("currentFarmMasterUserId", "");
                 animal.locationType = animalJsonObject.optString("locationType", "");
-                JSONObject animalStatusVO = animalJsonObject.getJSONObject("animalStatusVO");
-                animal.animalFeedStatus = animalStatusVO.getString("animalFeedStatus");
-                animal.animalInteractStatus = animalStatusVO.getString("animalInteractStatus");
-                animal.animalInteractStatus = animalStatusVO.getString("animalInteractStatus");
+                JSONObject animalStatusVO = animalJsonObject.optJSONObject("animalStatusVO");
+                if (animalStatusVO != null) {
+                    animal.animalFeedStatus = animalStatusVO.optString("animalFeedStatus", "");
+                    animal.animalInteractStatus = animalStatusVO.optString("animalInteractStatus", "");
+                }
                 animal.startEatTime = animalJsonObject.optLong("startEatTime");
                 animal.beHiredEndTime = animalJsonObject.optLong("beHiredEndTime");
                 animal.consumeSpeed = animalJsonObject.optDouble("consumeSpeed");
@@ -3664,6 +3676,202 @@ public class AntFarm extends ModelTask {
         return false;
     }
 
+    /**
+     * 雇佣自家农场的 NPC 并做它的任务：勾选里有当前 NPC 就只做任务，不在才遣返换雇；每只每天只处理一次。
+     * <p>失败只记一条日志、不做当天封禁：批次失效/冷却/数量超限都可能在后续轮次自行恢复。
+     */
+    private void hireNpc() {
+        try {
+            Set<String> selected = hireNpcList.getValue();
+            if (selected == null || selected.isEmpty()) {
+                return;
+            }
+            HireNpc target = null;
+            for (HireNpc npc : HireNpc.values()) {
+                if (selected.contains(npc.name()) && !Status.hasFlagToday(FLAG_HIRE_NPC_DONE + npc.name())) {
+                    target = npc;
+                    break;
+                }
+            }
+            if (target == null) {
+                // 勾选的 NPC 今天都处理过：保持现状，不再换雇，免得每轮重复遣返与雇佣
+                return;
+            }
+
+            syncAnimalStatus(ownerFarmId);
+            Animal current = findNpcAnimal();
+            if (current == null && hiredAnyNpcToday()) {
+                // 雇过却认不出来时打印真实字段：认不出会反复雇佣并报数量超限
+                if (animals != null) {
+                    for (Animal a : animals) {
+                        Log.i(TAG, "未识别到NPC：animalId=" + a.animalId + " subAnimalType=" + a.subAnimalType
+                                + " masterFarmId=" + a.masterFarmId + " interact=" + a.animalInteractStatus);
+                    }
+                }
+            }
+            if (current != null && !target.animalId.equals(current.animalId)) {
+                if (!sendBackNpc(current)) {
+                    return;
+                }
+                syncAnimalStatus(ownerFarmId);
+                current = null;
+            }
+            if (current == null) {
+                if (!hireNpcAnimal(target)) {
+                    return;
+                }
+                TimeUtil.sleep(1000);
+                syncAnimalStatus(ownerFarmId);
+            }
+
+            // 任务没拉成功就不打当日标记，下一轮继续补做（此时当前 NPC 已是对的，不会再换雇）
+            if (doNpcTask(target)) {
+                Status.flagToday(FLAG_HIRE_NPC_DONE + target.name());
+            }
+        } catch (Throwable t) {
+            Log.err(TAG, "hireNpc err:", t);
+        }
+    }
+
+    private Animal findNpcAnimal() {
+        if (animals == null) {
+            return null;
+        }
+        for (Animal animal : animals) {
+            if (isNpcAnimal(animal)) {
+                return animal;
+            }
+        }
+        return null;
+    }
+
+    /** 服务端子类型或登记的活动批次 ID 任一命中即为 NPC */
+    private boolean isNpcAnimal(Animal animal) {
+        return SubAnimalType.NPC.name().equals(animal.subAnimalType) || HireNpc.of(animal.animalId) != null;
+    }
+
+    /** 今天是否已经处理过任意一只 NPC（用来区分「本来就没有 NPC」和「雇了但认不出来」）。 */
+    private boolean hiredAnyNpcToday() {
+        for (HireNpc npc : HireNpc.values()) {
+            if (Status.hasFlagToday(FLAG_HIRE_NPC_DONE + npc.name())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean sendBackNpc(Animal npc) {
+        HireNpc leaving = HireNpc.of(npc.animalId);
+        String name = leaving == null ? "当前NPC" : leaving.nickName;
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.sendBackNpcAnimal(npc.animalId, npc.currentFarmId, npc.masterFarmId, true));
+            String memo = jo.optString("memo");
+            if ("SUCCESS".equals(memo)) {
+                Log.farm("雇佣NPC🐤遣返[" + name + "]");
+                return true;
+            }
+            // 领奖失败但动物其实已离开：按实际状态确认，否则会永远卡在换雇这一步
+            if (jo.toString().contains("NPC_ANIMAL03")) {
+                syncAnimalStatus(ownerFarmId);
+                if (findNpcAnimal() == null) {
+                    Log.farm("雇佣NPC🐤遣返[" + name + "]");
+                    return true;
+                }
+            }
+            Log.record("雇佣NPC🐤遣返[" + name + "]失败#" + memo);
+        } catch (Throwable t) {
+            Log.err(TAG, "sendBackNpc err:", t);
+        }
+        return false;
+    }
+
+    private boolean hireNpcAnimal(HireNpc npc) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.hireNpcAnimal(npc.animalId, npc.source));
+            String memo = jo.optString("memo");
+            if ("SUCCESS".equals(memo)) {
+                Log.farm("雇佣NPC🐤[" + npc.nickName + "]");
+                return true;
+            }
+            Log.record("雇佣NPC🐤[" + npc.nickName + "]雇佣失败#" + memo);
+        } catch (Throwable t) {
+            Log.err(TAG, "hireNpcAnimal err:", t);
+        }
+        return false;
+    }
+
+    /**
+     * 完成 NPC 任务并领奖：只申报 {@code taskMode=VIEW} 的任务，申报后重拉列表，最多两趟。
+     *
+     * @return 任务列表是否成功拿到（拿不到时不打当日标记，下一轮重试）
+     */
+    private boolean doNpcTask(HireNpc npc) {
+        boolean listed = false;
+        for (int round = 0; round < 2; round++) {
+            JSONObject jo;
+            try {
+                jo = new JSONObject(AntFarmRpcCall.listNpcFarmTask(npc.taskSceneCode));
+            } catch (Throwable t) {
+                Log.err(TAG, "listNpcFarmTask err:", t);
+                return listed;
+            }
+            String memo = jo.optString("memo");
+            if (!"SUCCESS".equals(memo)) {
+                Log.record("雇佣NPC🐤[" + npc.nickName + "]任务列表失败#" + memo);
+                return listed;
+            }
+            listed = true;
+            JSONArray ja = jo.optJSONArray("farmTaskList");
+            if (ja == null || ja.length() == 0) {
+                return true;
+            }
+            boolean acted = false;
+            for (int i = 0; i < ja.length(); i++) {
+                JSONObject task = ja.optJSONObject(i);
+                if (task == null) {
+                    continue;
+                }
+                String status = task.optString("taskStatus");
+                String taskId = task.optString("taskId");
+                String bizKey = task.optString("bizKey");
+                if ("TODO".equals(status) && "VIEW".equals(task.optString("taskMode")) && !bizKey.isEmpty()) {
+                    JSONObject r;
+                    try {
+                        r = new JSONObject(AntFarmRpcCall.doFarmTask(bizKey, npc.taskSceneCode));
+                    } catch (Throwable t) {
+                        Log.err(TAG, "doNpcTask err:", t);
+                        continue;
+                    }
+                    if ("SUCCESS".equals(r.optString("memo"))) {
+                        acted = true;
+                    } else {
+                        Log.record("雇佣NPC🐤[" + npc.nickName + "]任务申报失败#" + r.optString("memo"));
+                    }
+                } else if ("FINISHED".equals(status) && !taskId.isEmpty()) {
+                    String awardType = task.optString("awardType", "NPC_ANIMAL_FOOD");
+                    int awardCount = task.optInt("awardCount");
+                    JSONObject r;
+                    try {
+                        r = new JSONObject(AntFarmRpcCall.receiveNpcTaskAward(taskId, npc.taskSceneCode, awardType));
+                    } catch (Throwable t) {
+                        Log.err(TAG, "receiveNpcTaskAward err:", t);
+                        continue;
+                    }
+                    if ("SUCCESS".equals(r.optString("memo"))) {
+                        acted = true;
+                        Log.farm("雇佣NPC🐤[" + npc.nickName + "]任务奖励[" + awardCount + npc.awardUnitOf(awardType) + "]");
+                    } else {
+                        Log.record("雇佣NPC🐤[" + npc.nickName + "]领奖失败#" + r.optString("memo"));
+                    }
+                }
+            }
+            if (!acted) {
+                return true;
+            }
+        }
+        return true;
+    }
+
     /* 雇佣好友小鸡 */
     private void hireAnimal() {
         try {
@@ -3728,7 +3936,7 @@ public class AntFarm extends ModelTask {
         try {
             syncAnimalStatus(ownerFarmId);
             for (Animal animal : animals) {
-                if (!SubAnimalType.WORK.name().equals(animal.subAnimalType)) {
+                if (!SubAnimalType.WORK.name().equals(animal.subAnimalType) || isNpcAnimal(animal)) {
                     continue;
                 }
                 String taskId = "HIRE|" + animal.animalId;
@@ -4681,7 +4889,63 @@ public class AntFarm extends ModelTask {
     }
 
     public enum SubAnimalType {
-        NORMAL, GUEST, PIRATE, WORK
+        NORMAL, GUEST, PIRATE, WORK, NPC
+    }
+
+    /** 可雇佣的庄园 NPC：animalId 是活动批次 ID，活动切换后失效（失效只让雇佣失败，不影响其它功能） */
+    public enum HireNpc {
+        DA_BIAO_GE("大表鸽", "20250901105101013088000000000006", "zhimaxiaoji_lianjin", "ANTFARM_ZHIMA_NPC_TASK", "粒芝麻"),
+        // awardType 与饲料任务同值，单位只能按 NPC 定
+        HUANG_JIN_JI("黄金鸡", "20250725105101013088000000000004", "licaixiaoji_2025_1", "ANTFARM_CAIFU_NPC_TASK", "份黄金票"),
+        NONG_CHANG_XIAO_JI("农场小鸡", "20250613105101013088000000000002", "H5", "feiliaoji_202507", "g肥料");
+        // 以下四只暂不启用；解除时把上行分号改回逗号
+        // 淘金币需先 npcVisitAnimal 查到访并上报 IMPRESSION 才能雇，现有流程未实现
+        // TAO_JIN_BI_XIAO_JI("淘金币小鸡", "202609201051013088000000000018", "H5", "ANTFARM_TAOJINBI_NPC_TASK", "个淘金币"),
+        // DAO_DIAN_HONG_BAO_XIAO_JI("到店红包小鸡", "20260115105101013088000000000013", "H5", "ANTFARM_OFFLINE_PAY_NPC_TASK", "元红包"),
+        // TONG_YONG_HONG_BAO_XIAO_JI("通用红包小鸡", "202607281051013088000000000015", "H5", "ANTFARM_PWGROWTH_NPC_TASK_A", "元红包"),
+        // TONG_YONG_QUAN_BAO_XIAO_JI("通用券包小鸡", "202607281051013088000000000016", "H5", "ANTFARM_PWGROWTH_NPC_TASK_B", "元券包");
+
+        private final String nickName;
+        private final String animalId;
+        private final String source;
+        private final String taskSceneCode;
+        /** 奖励单位；null 时按 awardType 推断 */
+        private final String awardUnit;
+
+        HireNpc(String nickName, String animalId, String source, String taskSceneCode, String awardUnit) {
+            this.nickName = nickName;
+            this.animalId = animalId;
+            this.source = source;
+            this.taskSceneCode = taskSceneCode;
+            this.awardUnit = awardUnit;
+        }
+
+        /** 未指定单位时按 awardType 推断；认不出的类型原样显示，便于排查 */
+        String awardUnitOf(String awardType) {
+            if (awardUnit != null) {
+                return awardUnit;
+            }
+            if (awardType == null || awardType.isEmpty()) {
+                return "";
+            }
+            if (awardType.contains("FOOD")) {
+                return "g饲料";
+            }
+            if (awardType.contains("GOLD")) {
+                return "份黄金票";
+            }
+            return "份(" + awardType + ")";
+        }
+
+        /** 按 animalId 反查活动批次；批次失效或换了新批次时返回 null。 */
+        static HireNpc of(String animalId) {
+            for (HireNpc npc : values()) {
+                if (npc.animalId.equals(animalId)) {
+                    return npc;
+                }
+            }
+            return null;
+        }
     }
 
     public enum ToolType {

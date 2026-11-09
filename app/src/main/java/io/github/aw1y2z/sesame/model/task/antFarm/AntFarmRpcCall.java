@@ -88,6 +88,12 @@ public class AntFarmRpcCall {
         return ApplicationHook.requestString("com.alipay.antfarm.sendBackAnimal", args1);
     }
 
+    /** 遣返自家农场的 NPC（与偷吃小鸡共用 RPC，参数不同）；{@code receiveNPCReward=true} 顺带领奖 */
+    public static String sendBackNpcAnimal(String animalId, String currentFarmId, String masterFarmId, boolean receiveNPCReward) {
+        String args1 = "[{\"animalId\":\"" + animalId + "\",\"currentFarmId\":\"" + currentFarmId + "\"," + "\"masterFarmId\":\"" + masterFarmId + "\",\"receiveNPCReward\":" + receiveNPCReward + ",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\"," + "\"sendType\":\"NORMAL\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]";
+        return ApplicationHook.requestString("com.alipay.antfarm.sendBackAnimal", args1);
+    }
+
     public static String harvestProduce(String farmId) {
         String args1 = "[{\"canMock\":true,\"farmId\":\"" + farmId + "\",\"giftType\":\"\"," + "\"requestType" + "\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]";
         return ApplicationHook.requestString("com.alipay.antfarm.harvestProduce", args1);
@@ -123,6 +129,12 @@ public class AntFarmRpcCall {
 
     public static String listFarmTask() {
         String args1 = "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"version\":\"" + VERSION + "\"}]";
+        return ApplicationHook.requestString("com.alipay.antfarm.listFarmTask", args1);
+    }
+
+    /** 按场景码查询 NPC 任务列表：不同 NPC 用不同 {@code taskSceneCode}，不能复用无参版本。 */
+    public static String listNpcFarmTask(String taskSceneCode) {
+        String args1 = "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskSceneCode\":\"" + taskSceneCode + "\",\"version\":\"" + VERSION + "\"}]";
         return ApplicationHook.requestString("com.alipay.antfarm.listFarmTask", args1);
     }
 
@@ -170,6 +182,12 @@ public class AntFarmRpcCall {
 
     public static String receiveFarmTaskAward(String taskId) {
         String args1 = "[{\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\",\"taskId\":\"" + taskId + "\",\"version\":\"" + VERSION + "\"}]";
+        return ApplicationHook.requestString("com.alipay.antfarm.receiveFarmTaskAward", args1);
+    }
+
+    /** 领取 NPC 任务奖励：需要任务所属场景码与奖励类型（NPC 场景为 NPC_ANIMAL_FOOD）。 */
+    public static String receiveNpcTaskAward(String taskId, String taskSceneCode, String awardType) {
+        String args1 = "[{\"awardType\":\"" + awardType + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"H5\"," + "\"taskId\":\"" + taskId + "\",\"taskSceneCode\":\"" + taskSceneCode + "\",\"version\":\"" + VERSION + "\"}]";
         return ApplicationHook.requestString("com.alipay.antfarm.receiveFarmTaskAward", args1);
     }
 
@@ -460,6 +478,13 @@ public class AntFarmRpcCall {
     */
     public static String hireAnimal(String farmId, String animalId) {
         return ApplicationHook.requestString("com.alipay.antfarm.hireAnimal", "[{\"friendFarmId\":\"" + farmId + "\"," + "\"hireActionType\":\"HIRE_IN_FRIEND_FARM\",\"hireAnimalId\":\"" + animalId + "\",\"requestType" + "\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"sendCardChat\":false," + "\"source" + "\":\"H5\",\"version\":\"" + VERSION + "\"}]");
+    }
+
+    /** 雇佣自家农场的 NPC：与 {@link #hireAnimal(String, String)} 同一 RPC，改用 {@code HIRE_IN_SELF_FARM} 且 {@code isNpcAnimal=true} */
+    public static String hireNpcAnimal(String animalId, String source) {
+        String src = (source == null || source.isEmpty()) ? "H5" : source;
+        String args1 = "[{\"hireActionType\":\"HIRE_IN_SELF_FARM\",\"hireAnimalId\":\"" + animalId + "\",\"isNpcAnimal\":true," + "\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\",\"source\":\"" + src + "\",\"version\":\"" + VERSION + "\"}]";
+        return ApplicationHook.requestString("com.alipay.antfarm.hireAnimal", args1);
     }
 
     public static String drawGameCenterAward() {
