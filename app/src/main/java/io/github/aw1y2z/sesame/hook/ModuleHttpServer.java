@@ -55,9 +55,8 @@ public class ModuleHttpServer extends NanoHTTPD {
         register(path, handler, "");
     }
     
-    /** 注册路由并记录描述 */
+    /** 注册路由 */
     private void register(String path, HttpHandler handler, String description) {
-        Log.i("Registering handler : " + path + " -> " + description);
         routes.put(path, handler);
     }
     

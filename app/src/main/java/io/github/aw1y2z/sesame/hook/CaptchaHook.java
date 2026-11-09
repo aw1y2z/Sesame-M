@@ -61,8 +61,6 @@ public class CaptchaHook {
      */
     public static void setupHook(ClassLoader classLoader) {
         savedClassLoader = classLoader;
-        Log.i(TAG + "验证码Hook系统初始化完成");
-        Log.i(TAG + "⚠️ Hook配置将在配置文件加载后同步");
         
         // 注意：此时配置文件还未加载，不能立即应用Hook
         // 实际的Hook应用会在BaseModel.boot()中进行
@@ -79,24 +77,13 @@ public class CaptchaHook {
             Log.i("⚠️ ClassLoader未初始化，请先调用setupHook()");
             return;
         }
-        
-        Log.i(TAG + "📝 更新验证码Hook状态:");
-        Log.record(TAG + "  UI层拦截: " + (enableUI ? "✅ 开启" : "⚠️ 关闭"));
-        
         // 先卸载所有现有Hook
         unhookAll();
-        
         // 根据开关状态重新Hook
         if (enableUI) {
-            Log.i(TAG + "  🔧 设置UI层拦截...");
             //uiHookUnhook = hookCaptchaDialogShow(classLoader);
             uiHookUnhook = hookCaptchaDialogShowAndClose(classLoader);
         }
-        else {
-            Log.i(TAG + "  ⚠️ 验证码拦截已关闭");
-        }
-        
-        Log.i(TAG + "验证码Hook更新完成 ✅");
     }
     
     /**

@@ -344,7 +344,6 @@ public class ApplicationHook extends XposedModule {
             });
             try {
                 XHelpers.findAndHookMethod("com.alipay.mobile.nebulaappproxy.api.rpc.H5AppRpcUpdate", classLoader, "matchVersion", classLoader.loadClass(ClassUtil.H5PAGE_NAME), Map.class, String.class, XC_MethodReplacement.returnConstant(false));
-                Log.i(TAG, "hook matchVersion successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook matchVersion err:", t);
             }
@@ -352,7 +351,6 @@ public class ApplicationHook extends XposedModule {
                 XHelpers.findAndHookMethod("com.alipay.mobile.quinox.LauncherActivity", classLoader, "onResume", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        Log.i(TAG, "Activity onResume");
                         String targetUid = getUserId();
                         if (targetUid == null) {
                             Log.record("用户未登录");
@@ -391,7 +389,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook login successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook login err:", t);
             }
@@ -410,7 +407,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook SchemeLauncherActivity successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook SchemeLauncherActivity err:", t);
             }
@@ -434,7 +430,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook CSGAPushActivity successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook CSGAPushActivity err:", t);
             }
@@ -454,7 +449,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook Activity.onResume successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook Activity.onResume err:", t);
             }
@@ -478,7 +472,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook Activity.onWindowFocusChanged successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook Activity.onWindowFocusChanged err:", t);
             }
@@ -506,7 +499,6 @@ public class ApplicationHook extends XposedModule {
                         // 广播失败会导致 UI 迟迟显示「未激活」，sendStatusBroadcast 内部已记日志
                         sendStatusBroadcast(appService);
 
-                        Log.i(TAG, "Service onCreate");
                         context = appService.getApplicationContext();
                         service = appService;
                         mainHandler = new Handler(Looper.getMainLooper());
@@ -616,7 +608,6 @@ public class ApplicationHook extends XposedModule {
                         }
                     }
                 });
-                Log.i(TAG, "hook service onCreate successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook service onCreate err:", t);
             }
@@ -681,11 +672,9 @@ public class ApplicationHook extends XposedModule {
                         param.setResult(answerAtFrontDeskQuestion(param));
                     }
                 });
-                Log.i(TAG, "hook MiscUtils successfully");
             } catch (Throwable t) {
                 Log.err(TAG, "hook MiscUtils err:", t);
             }
-            Log.i(TAG, "load success: " + lpparam.packageName + " proc=" + lpparam.processName + " hooked=" + hooked);
         }
     }
 
@@ -711,7 +700,6 @@ public class ApplicationHook extends XposedModule {
                 calendar.set(Calendar.MILLISECOND, 0);
                 if (setAlarmTask(calendar.getTimeInMillis(), pendingIntent)) {
                     alarm0Pi = pendingIntent;
-                    Log.record("设置定时唤醒:0|000000");
                 }
             } catch (Exception e) {
                 Log.err(TAG, "setWakenAt0 err:", e);
@@ -733,7 +721,6 @@ public class ApplicationHook extends XposedModule {
                                 if (setAlarmTask(wakenAtTimeCalendar.getTimeInMillis(), wakenAtTimePendingIntent)) {
                                     String wakenAtTimeKey = seq + "|" + wakenAtTime;
                                     wakenAtTimeAlarmMap.put(wakenAtTimeKey, wakenAtTimePendingIntent);
-                                    Log.record("设置定时唤醒:" + wakenAtTimeKey);
                                 }
                             }
                         }
@@ -755,7 +742,6 @@ public class ApplicationHook extends XposedModule {
                     PendingIntent wakenAtTimePendingIntent = entry.getValue();
                     if (unsetAlarmTask(wakenAtTimePendingIntent)) {
                         wakenAtTimeAlarmMap.remove(wakenAtTimeKey);
-                        Log.record("取消定时唤醒:" + wakenAtTimeKey);
                     }
                 } catch (Exception e) {
                     Log.err(TAG, "unsetWakenAtTime err:", e);
@@ -764,7 +750,6 @@ public class ApplicationHook extends XposedModule {
             try {
                 if (unsetAlarmTask(alarm0Pi)) {
                     alarm0Pi = null;
-                    Log.record("取消定时唤醒:0|000000");
                 }
             } catch (Exception e) {
                 Log.err(TAG, "unsetWakenAt0 err:", e);
@@ -928,8 +913,6 @@ public class ApplicationHook extends XposedModule {
 
                 UserIdMap.initUser(userId);
                 Model.initAllModel();
-                // 模块版本只在执行阶段打一次，加载阶段不重复打印（否则启动段同一条出现两次）
-                Log.record("开始加载");
                 ConfigV2.load(userId);
 
                 boolean enableModule = Model.getModel(BaseModel.class).getEnableField().getValue();
@@ -972,7 +955,6 @@ public class ApplicationHook extends XposedModule {
                 updateDay();
                 BaseModel.initData();
                 BaseModel.initRpcRequest();
-                Log.record("加载完成");
                 Toast.show("芝麻粒加载成功");
                 init = true;
             }
@@ -1239,7 +1221,6 @@ public class ApplicationHook extends XposedModule {
             } else {
                 alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation);
             }
-            Log.i("setAlarmTask triggerAtMillis:" + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(triggerAtMillis) + " operation:" + (operation == null ? "" : operation.toString()));
             return true;
         } catch (Throwable th) {
             Log.err(TAG, "setAlarmTask err:", th);
@@ -1656,7 +1637,6 @@ public class ApplicationHook extends XposedModule {
             if (action == null) {
                 return;
             }
-            Log.i("sesame broadcast action:" + action);
             switch (action) {
                 case ACTION_PAIR_REQUEST:
                     handlePairRequest(context, intent);
@@ -1785,7 +1765,6 @@ public class ApplicationHook extends XposedModule {
                 try {
                     context.unregisterReceiver(broadcastReceiver);
                     broadcastReceiverRegistered = false;
-                    Log.i(TAG, "hook unregisterBroadcastReceiver successfully");
                 } catch (Throwable t) {
                     Log.err(TAG, "hook unregisterBroadcastReceiver err:", t);
                 }
@@ -1806,7 +1785,6 @@ public class ApplicationHook extends XposedModule {
                 context.registerReceiver(broadcastReceiver, intentFilter);
             }
             broadcastReceiverRegistered = true;
-            Log.i(TAG, "hook registerBroadcastReceiver successfully");
         } catch (Throwable th) {
             Log.err(TAG, "hook registerBroadcastReceiver err:", th);
         }

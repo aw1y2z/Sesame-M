@@ -1129,7 +1129,10 @@ public class AntForestV2 extends ModelTask {
             long end = System.currentTimeMillis();
             long serverTime = userHomeObject.getLong("now");
             int offsetTime = offsetTimeMath.nextInteger((int) ((start + end) / 2 - serverTime));
-            Log.i("服务器时间：" + serverTime + "，本地与服务器时间差：" + offsetTime);
+            // 正常对时偏差只有几十到几百毫秒，只有超过 1s 才值得记一条，否则每次请求都刷全量日志
+            if (Math.abs(offsetTime) > 1000) {
+                Log.i("服务器时间：" + serverTime + "，本地与服务器时间差：" + offsetTime);
+            }
             //兼容组队模式
             if (isTeam(userHomeObject)) {
                 JSONObject teamHomeResult = userHomeObject.optJSONObject("teamHomeResult");
@@ -1165,7 +1168,9 @@ public class AntForestV2 extends ModelTask {
             long end = System.currentTimeMillis();
             long serverTime = userHomeObject.getLong("now");
             int offsetTime = offsetTimeMath.nextInteger((int) ((start + end) / 2 - serverTime));
-            Log.i("服务器时间：" + serverTime + "，本地与服务器时间差：" + offsetTime);
+            if (Math.abs(offsetTime) > 1000) {
+                Log.i("服务器时间：" + serverTime + "，本地与服务器时间差：" + offsetTime);
+            }
         } catch (Throwable t) {
             Log.printStackTrace(t);
         }

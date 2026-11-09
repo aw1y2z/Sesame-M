@@ -153,7 +153,6 @@ class MiuixMainActivity : MiuixBaseActivity() {
     private val broadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val action = intent.action
-            Log.i("view broadcast action:" + action + " intent:" + intent)
             if (action != null) {
                 when (action) {
                     "io.github.aw1y2z.sesame.status" -> {

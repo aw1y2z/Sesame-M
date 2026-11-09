@@ -280,7 +280,6 @@ public class Statistics {
         if (StringUtil.isEmpty(currentUid) || currentUid.equals(loadedUid)) {
             return loadedUid;
         }
-        Log.i(TAG, "统计归属由[" + loadedUid + "]变为[" + currentUid + "]，按当前账号重新加载");
         load();
         return loadedUid;
     }

@@ -213,7 +213,6 @@ public class ConfigV2 {
     }
     
     public static synchronized ConfigV2 load(String userId) {
-        Log.i(TAG, "开始加载配置");
         String userName = "";
         File configV2File = null;
         try {
@@ -281,7 +280,6 @@ public class ConfigV2 {
         captureBaseline();
         // 记下本次同步到的文本，供 save() 判断磁盘是否被别的进程改过
         lastSyncedText = configV2File != null && configV2File.exists() ? FileUtil.readFromFile(configV2File) : null;
-        Log.i(TAG, "加载配置结束");
         return INSTANCE;
     }
 

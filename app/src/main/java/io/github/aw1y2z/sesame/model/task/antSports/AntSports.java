@@ -160,7 +160,6 @@ public class AntSports extends ModelTask {
                     }
                 }
             });
-            Log.i(TAG, "hook readDailyStep successfully");
         } catch (Throwable t) {
             Log.err(TAG, "hook readDailyStep err:", t);
         }

@@ -25,7 +25,6 @@ public class AuthCodeHelper {
      */
     public static void init(ClassLoader loader) {
         classLoader = loader;
-        Log.record("Oauth2AuthCodeHelper 初始化完成");
     }
     
     /**

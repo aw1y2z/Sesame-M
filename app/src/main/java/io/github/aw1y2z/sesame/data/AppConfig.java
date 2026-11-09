@@ -174,7 +174,15 @@ public class AppConfig {
                 // 导致「运行日志已关闭」时启动进程仍写入加载日志
                 if (!loadLogged) {
                     loadLogged = true;
-                    Log.i("加载APP配置");
+                    // 跨进程去重：宿主有多个进程，各自 load 一次，原实现每进程写一条（一天 180+ 条）。
+                    // 用配置内容指纹落盘判断，只有首次加载或配置真的变了才记一条。
+                    File markFile = new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.loadmark");
+                    String mark = Integer.toHexString(json.hashCode()) + ":" + json.length();
+                    String lastMark = markFile.exists() ? FileUtil.readFromFile(markFile) : null;
+                    if (!mark.equals(lastMark)) {
+                        Log.i("加载APP配置");
+                        FileUtil.write2File(mark, markFile);
+                    }
                 }
                 String formatted = toSaveStr();
                 if (formatted != null && !formatted.equals(json)) {

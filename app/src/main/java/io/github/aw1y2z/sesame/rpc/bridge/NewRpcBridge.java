@@ -87,7 +87,6 @@ public class NewRpcBridge implements RpcBridge {
                     , loader.loadClass("com.alibaba.ariver.engine.api.bridge.model.ApiContext")
                     , bridgeCallbackClazz
             );
-            Log.i(TAG, "get newRpcCallMethod successfully");
         } catch (Exception e) {
             Log.i(TAG, "get newRpcCallMethod err:");
             throw e;

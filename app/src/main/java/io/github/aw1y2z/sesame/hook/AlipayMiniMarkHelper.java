@@ -28,7 +28,6 @@ public class AlipayMiniMarkHelper {
      */
     public static void init(ClassLoader loader) {
         classLoader = loader;
-        Log.record("AlipayMiniMarkHelper 初始化完成");
     }
     
     /**
