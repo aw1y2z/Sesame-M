@@ -45,7 +45,17 @@ public class FriendWatch extends IdAndName {
         return super.compareTo(o);
     }
 
-    public static void friendWatch(String id, int collectedEnergy) {
+    /**
+     * 记录一个好友本次被收取的能量。
+     * <p>调用方是最多 16 条并行收取线程，而 {@link #joFriendWatch} 是单个共享 JSONObject：
+     * 这里的「取-判-建-改」必须整体原子，否则并发首次写入会互相覆盖，或与
+     * {@link #updateDay()} 的遍历撞成 ConcurrentModificationException。
+     */
+    public static synchronized void friendWatch(String id, int collectedEnergy) {
+        if (joFriendWatch == null) {
+            // 已 unload 或尚未 load：静默丢弃这一次统计，不在空表上继续累加
+            return;
+        }
         try {
             String maskName = UserIdMap.getMaskName(id);
             // 通讯录好友表已就绪时，查不到名字说明是种树 PK 等渠道来的陌生关系：
@@ -98,6 +108,10 @@ public class FriendWatch extends IdAndName {
             Log.debug(TAG + ", 好友统计加载失败，跳过保存");
             return;
         }
+        if (joFriendWatch == null) {
+            // unload 之后又触发保存：没有可写的内容，直接跳过而不是抛 NPE
+            return;
+        }
         try {
             FileUtil.write2File(joFriendWatch.toString(), FileUtil.getFriendWatchFile());
         } catch (Exception e){
@@ -105,8 +119,13 @@ public class FriendWatch extends IdAndName {
         }
     }
 
-    public static void updateDay() {
-        if (loadFailed) {
+    /**
+     * 跨周结算：把各好友的 weekGet 累加进 allGet 并清零。
+     * <p>与 {@link #friendWatch} 共用同一把锁——一边遍历 keys() 一边被收取线程 put 新好友，
+     * 会抛 ConcurrentModificationException 并让本次结算半途而废。
+     */
+    public static synchronized void updateDay() {
+        if (loadFailed || joFriendWatch == null) {
             return;
         }
         if (!needUpdateAll(FileUtil.getFriendWatchFile().lastModified())) {

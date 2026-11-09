@@ -123,7 +123,9 @@ public abstract class Model {
                     groupModelConfigMap.put(group, modelConfigMap);
                 }
                 modelConfigMap.put(modelCode, modelConfig);
-            } catch (ReflectiveOperationException e) {
+            } catch (Exception | LinkageError e) {
+                // 单个模型构造失败不能中断其余模型的注册：原先只捕 ReflectiveOperationException，
+                // 构造器抛运行时异常会冒泡出 initAllModel，其后的模型全部不注册、任务链整段缺失。
                 Log.printStackTrace(e);
             }
         }
