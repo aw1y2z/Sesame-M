@@ -1757,8 +1757,9 @@ public class AntForestV2 extends ModelTask {
             return;
         }
         try {
-            JSONObject joHomePage = new JSONObject(AntForestRpcCall.queryHomePage());
-            if (MessageUtil.checkResultCode(TAG, joHomePage)) {
+            // 复用 querySelfHome：组队版个人数据在 teamHomeResult.mainMember 下，直读根对象取不到道具
+            JSONObject joHomePage = querySelfHome();
+            if (joHomePage != null) {
                 collectRobExpandEnergy(joHomePage);
             }
         } catch (Throwable th) {
@@ -1778,12 +1779,19 @@ public class AntForestV2 extends ModelTask {
                 ja = joHomePage.optJSONArray("usingUserProps");
             }
             if (ja == null) {
+                Log.i(TAG, "额外能量⏭️未在使用倍卡");
                 return;
             }
             for (int i = 0; i < ja.length(); i++) {
-                JSONObject jo = ja.getJSONObject(i);
-                if (PropGroup.robExpandCard.name().equals(jo.getString("propGroup"))) {
-                    collectRobExpandEnergy(jo.optString("extInfo"), jo.getString("propId"), jo.getString("propType"));
+                // 单个道具结构异常不能中断整轮扫描：逐项兜住，取不到字段按跳过处理
+                try {
+                    JSONObject jo = ja.optJSONObject(i);
+                    if (jo == null || !PropGroup.robExpandCard.name().equals(jo.optString("propGroup"))) {
+                        continue;
+                    }
+                    collectRobExpandEnergy(jo.optString("extInfo"), jo.optString("propId"), jo.optString("propType"));
+                } catch (Throwable th) {
+                    Log.err(TAG, "collectRobExpandEnergy item err:", th);
                 }
             }
         } catch (Throwable th) {
@@ -1801,10 +1809,14 @@ public class AntForestV2 extends ModelTask {
         }
         try {
             JSONObject jo = new JSONObject(extInfo);
-            double leftEnergy = Double.parseDouble(jo.optString("leftEnergy", "0"));
+            double leftEnergy = jo.optDouble("leftEnergy", 0);
+            int threshold = collectRobExpandEnergy.getValue();
             // 开关开启：受数值限制，只有大于"倍卡额外能量"阈值才收取
-            if (leftEnergy > collectRobExpandEnergy.getValue()) {
+            if (leftEnergy > threshold) {
                 collectRobExpandEnergy(propId, propType);
+            } else {
+                // 被阈值拦下不是服务端行为，留过程日志便于区分"没进分支"与"服务端拒绝"
+                Log.i(TAG, "额外能量⏭️剩余[" + leftEnergy + "g]未超过阈值[" + threshold + "g]");
             }
         } catch (Throwable th) {
             Log.err(TAG, "collectRobExpandEnergy err:", th);
