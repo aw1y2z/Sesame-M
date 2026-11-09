@@ -25,6 +25,9 @@ import java.util.TreeMap;
 public class GreenFinance extends ModelTask {
     private static final String TAG = GreenFinance.class.getSimpleName();
 
+    /** 金币巡查翻页上限：防服务端恒回 lastPage=false 且游标不前进时死循环 */
+    private static final int MAX_STEAL_PAGES = 50;
+
     private BooleanModelField greenFinanceLsxd;
     private BooleanModelField greenFinanceLsbg;
     private BooleanModelField greenFinanceLscg;
@@ -433,7 +436,13 @@ public class GreenFinance extends ModelTask {
                 return;
             }
             int n = 0;
+            int page = 0;
             while (true) {
+                // 服务端恒回 lastPage=false 且游标不前进时，这里会一直翻同一页
+                if (++page > MAX_STEAL_PAGES) {
+                    Log.i(TAG, "金币巡查翻页超过上限，本轮停止");
+                    break;
+                }
                 try {
                     String str = GreenFinanceRpcCall.queryRankingList(n);
                     TimeUtil.sleep(1500);
@@ -448,7 +457,13 @@ public class GreenFinance extends ModelTask {
                         Status.greenFinancePointFriend();
                         return;
                     }
-                    n = result.getInt("nextStartIndex");
+                    // 游标不前进会永远翻同一页，这种情况直接结束本轮
+                    int nextStartIndex = result.getInt("nextStartIndex");
+                    if (nextStartIndex <= n) {
+                        Log.i(TAG, "金币巡查翻页游标未前进(" + n + " -> " + nextStartIndex + ")，本轮停止");
+                        break;
+                    }
+                    n = nextStartIndex;
                     JSONArray list = result.getJSONArray("rankingList");
                     for (int i = 0; i < list.length(); i++) {
                         JSONObject object = list.getJSONObject(i);

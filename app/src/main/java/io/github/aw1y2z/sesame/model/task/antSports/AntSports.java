@@ -374,6 +374,12 @@ public class AntSports extends ModelTask {
     private static final int TASK_INTERVAL_MIN_MS = 5000;
     private static final int TASK_INTERVAL_MAX_MS = 9000;
 
+    /**
+     * 健康岛任务的自递归上限：任务上报成功但服务端状态不前进时，
+     * 原实现会一轮轮自调用直到 StackOverflowError
+     */
+    private static final int MAX_SELF_RETRY = 3;
+
     /** 命中风控（1009）当天的标记：被拦后官方连只读查询也不放行，本模块当天不再执行运动侧操作 */
     private static final String FLAG_RISK_TODAY = "sports::risk1009";
 
@@ -2220,6 +2226,13 @@ public class AntSports extends ModelTask {
      * 查询气泡任务并处理
      */
     public static void queryAndProcessBubbleTasks() {
+        queryAndProcessBubbleTasks(0);
+    }
+
+    /**
+     * @param attempt 已自递归的次数：服务端回「操作成功」但状态不前进时原实现会无限加深调用栈
+     */
+    private static void queryAndProcessBubbleTasks(int attempt) {
         try {
             JSONObject jsonResult = new JSONObject(AntSportsRpcCall.queryBubbleTask());
             if (!MessageUtil.checkSuccess(TAG, jsonResult)) {
@@ -2259,7 +2272,11 @@ public class AntSports extends ModelTask {
             }
             // 如果有任务触发了状态变更，重试一次
             if (needRetry) {
-                queryAndProcessBubbleTasks();
+                if (attempt >= MAX_SELF_RETRY) {
+                    Log.i(TAG, "气泡任务重试达到上限，本轮停止");
+                    return;
+                }
+                queryAndProcessBubbleTasks(attempt + 1);
             }
         } catch (Exception e) {
             Log.err(TAG, "queryBubbleTask err:", e);
@@ -2347,6 +2364,11 @@ public class AntSports extends ModelTask {
      * 处理任务中心任务
      */
     public static void processTaskCenter() {
+        processTaskCenter(0);
+    }
+
+    /** @param attempt 已自递归的次数，见 {@link #MAX_SELF_RETRY} */
+    private static void processTaskCenter(int attempt) {
         try {
             JSONObject jsonResult = new JSONObject(AntSportsRpcCall.queryTaskCenter());
             if (!MessageUtil.checkSuccess(TAG, jsonResult)) {
@@ -2387,7 +2409,11 @@ public class AntSports extends ModelTask {
             }
 
             if (needRetry) {
-                processTaskCenter();
+                if (attempt >= MAX_SELF_RETRY) {
+                    Log.i(TAG, "任务中心重试达到上限，本轮停止");
+                    return;
+                }
+                processTaskCenter(attempt + 1);
             }
         } catch (Exception e) {
             Log.err(TAG, "processTaskCenter err:", e);
@@ -2398,6 +2424,11 @@ public class AntSports extends ModelTask {
      * 处理浏览任务
      */
     public static void processBrowseTasks() {
+        processBrowseTasks(0);
+    }
+
+    /** @param attempt 已自递归的次数，见 {@link #MAX_SELF_RETRY} */
+    private static void processBrowseTasks(int attempt) {
         try {
             JSONObject jsonResult = new JSONObject(AntSportsRpcCall.queryTaskInfo());
             if (!MessageUtil.checkSuccess(TAG, jsonResult)) {
@@ -2431,7 +2462,11 @@ public class AntSports extends ModelTask {
             }
 
             if (hasNewTask) {
-                processBrowseTasks();
+                if (attempt >= MAX_SELF_RETRY) {
+                    Log.i(TAG, "浏览任务重试达到上限，本轮停止");
+                    return;
+                }
+                processBrowseTasks(attempt + 1);
             }
         } catch (Exception e) {
             Log.err(TAG, "processBrowseTasks err:", e);

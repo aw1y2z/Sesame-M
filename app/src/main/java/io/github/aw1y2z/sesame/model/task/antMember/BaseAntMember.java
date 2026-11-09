@@ -43,6 +43,9 @@ public abstract class BaseAntMember extends ModelTask {
     private static final String INT_FLAG_SIGN_PAGE_FETCH_FAIL = "MemberTask::signPageTaskListFetchFail";
     private static final int MAX_FETCH_FAILURES = 3;
 
+    /** 列表重拉上限：任务上报成功但服务端状态不前进时，force 刷新最多再跑几遍 */
+    private static final int MAX_RECHECK_ROUNDS = 3;
+
     /** 共享取数缓存：同一账号、TTL 内只真正取一次 */
     private static final long CACHE_TTL = 60_000L;
     private static JSONObject cachedSignPage;
@@ -100,13 +103,20 @@ public abstract class BaseAntMember extends ModelTask {
             return false;
         }
         boolean doubleCheck;
+        int recheck = 0;
         do {
             doubleCheck = processSignPageTaskList(jo, adOnly, blacklist);
-            if (doubleCheck) {
-                jo = fetchSignPageTaskList(true); // 有任务完成，强制刷新再跑一遍
+            if (!doubleCheck) {
+                break;
             }
+            // 服务端「上报成功但状态不前进」时这里会一直置 doubleCheck，force 刷新无限重发
+            if (++recheck > MAX_RECHECK_ROUNDS) {
+                Log.i(TAG, "会员任务列表重拉达到上限，本轮停止");
+                break;
+            }
+            jo = fetchSignPageTaskList(true); // 有任务完成，强制刷新再跑一遍
         }
-        while (doubleCheck && jo != null);
+        while (jo != null);
         return true;
     }
 
@@ -121,13 +131,19 @@ public abstract class BaseAntMember extends ModelTask {
             return;
         }
         boolean doubleCheck;
+        int recheck = 0;
         do {
             doubleCheck = processQueryAllStatusTaskList(jo, adOnly, blacklist);
-            if (doubleCheck) {
-                jo = fetchQueryAllStatusTaskList(true);
+            if (!doubleCheck) {
+                break;
             }
+            if (++recheck > MAX_RECHECK_ROUNDS) {
+                Log.i(TAG, "可领任务列表重拉达到上限，本轮停止");
+                break;
+            }
+            jo = fetchQueryAllStatusTaskList(true);
         }
-        while (doubleCheck && jo != null);
+        while (jo != null);
     }
 
     /**
