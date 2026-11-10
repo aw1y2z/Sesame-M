@@ -181,10 +181,10 @@ public class AntMember extends BaseAntMember {
                         Status.flagToday("MemberTask::queryPointCertDone");
                     }
                 }
-                // 先判断任务列表能否取到：风控(1009等)拿不到列表时，不再请求其它任务接口，避免加重风控
-                if (runSignPageTaskList(false, AntMemberTaskList.getValue())) {
-                    runQueryAllStatusTaskList(false, AntMemberTaskList.getValue());
-                }
+                // 两个列表各自限流，互不门控：「可领任务」列表才是浏览任务的主要来源，
+                // 不能因为 signPageTaskList 被限流就整体跳过
+                runSignPageTaskList(false, AntMemberTaskList.getValue());
+                runQueryAllStatusTaskList(false, AntMemberTaskList.getValue());
             }
             if (enableAdTask.getValue()) {
                 if (AutoAntMemberAdTaskList.getValue()) {
@@ -201,9 +201,8 @@ public class AntMember extends BaseAntMember {
                     MessageUtil.syncTaskBlackList("会员广告任务", "AntMemberAdTaskList", blackList, whiteList, AntMemberAdTaskList);
                 }
                 // 广告任务：复用会员任务的取数结果(共享缓存)，只处理 adTask=true 且无 targetBusiness 的任务
-                if (runSignPageTaskList(true, AntMemberAdTaskList.getValue())) {
-                    runQueryAllStatusTaskList(true, AntMemberAdTaskList.getValue());
-                }
+                runSignPageTaskList(true, AntMemberAdTaskList.getValue());
+                runQueryAllStatusTaskList(true, AntMemberAdTaskList.getValue());
             }
             
             if (!Status.hasFlagToday("MemberTask::memberPointExchangeBenefitDone")) {

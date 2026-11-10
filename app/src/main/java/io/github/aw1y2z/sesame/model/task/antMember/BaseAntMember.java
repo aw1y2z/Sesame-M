@@ -12,6 +12,7 @@ import io.github.aw1y2z.sesame.model.extensions.ExtensionsHandle;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
 import io.github.aw1y2z.sesame.util.Status;
+import io.github.aw1y2z.sesame.util.StringUtil;
 import io.github.aw1y2z.sesame.util.TimeUtil;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberTaskListMap;
@@ -38,19 +39,23 @@ public abstract class BaseAntMember extends ModelTask {
     /** 两个类共享的当日"任务已完成"标记：列表为空(当天无可做任务)即置位，后续轮次跳过，不再发 RPC */
     private static final String FLAG_SIGN_PAGE_TASK_DONE = "MemberTask::signPageTaskListDone";
     private static final String FLAG_QUERY_ALL_TASK_DONE = "MemberTask::queryAllStatusTaskListDone";
+    /** 可领任务列表独自的限流标记：与 signPageTaskList 分开，避免一个接口被限流连累另一个 */
+    private static final String FLAG_QUERY_ALL_TASK_FAILED = "MemberTask::queryAllStatusTaskListFailed";
 
     /** 当日取数失败计数：连续失败到上限才落上面的标记，一次抖动不再废掉整天 */
     private static final String INT_FLAG_SIGN_PAGE_FETCH_FAIL = "MemberTask::signPageTaskListFetchFail";
     private static final int MAX_FETCH_FAILURES = 3;
 
-    /** 列表重拉上限：任务上报成功但服务端状态不前进时，force 刷新最多再跑几遍 */
-    private static final int MAX_RECHECK_ROUNDS = 3;
+    /** 取数失败后的冷却：1009 属限流，失败后立刻重试只会把风控窗口拉长 */
+    private static final String INT_FLAG_FETCH_COOLDOWN = "MemberTask::fetchCooldownUntilSec";
+    private static final int FETCH_FAIL_COOLDOWN_SEC = 600;
 
-    /** 共享取数缓存：同一账号、TTL 内只真正取一次 */
+    /** 共享取数缓存：两个接口各自记时间，避免一个接口刷新把另一个的过期缓存变成"新鲜" */
     private static final long CACHE_TTL = 60_000L;
     private static JSONObject cachedSignPage;
     private static JSONObject cachedQueryAll;
     private static long cacheTime = 0;
+    private static long queryAllCacheTime = 0;
     private static String cacheUid = "";
 
     /** 日志标签：adOnly=true 用「会员广告任务」，false 用「会员任务」 */
@@ -102,48 +107,23 @@ public abstract class BaseAntMember extends ModelTask {
         if (jo == null) {
             return false;
         }
-        boolean doubleCheck;
-        int recheck = 0;
-        do {
-            doubleCheck = processSignPageTaskList(jo, adOnly, blacklist);
-            if (!doubleCheck) {
-                break;
-            }
-            // 服务端「上报成功但状态不前进」时这里会一直置 doubleCheck，force 刷新无限重发
-            if (++recheck > MAX_RECHECK_ROUNDS) {
-                Log.i(TAG, "会员任务列表重拉达到上限，本轮停止");
-                break;
-            }
-            jo = fetchSignPageTaskList(true); // 有任务完成，强制刷新再跑一遍
-        }
-        while (jo != null);
+        // 一轮只取一次列表：同一轮内第二次请求必被服务端限流(1009)，复查刷新留给下一轮
+        processSignPageTaskList(jo, adOnly, blacklist);
         return true;
     }
 
-    /** 跑 queryAllStatusTaskList：取数（共用）、解析、按职责处理 */
+    /**
+     * 跑 queryAllStatusTaskList：取数（共用）、解析、按职责处理。
+     * <p>与 signPageTaskList 完全解耦：两个接口各自限流，「可领任务」列表是浏览任务的主要来源，
+     * 不能因为另一个接口取数失败就整体跳过。
+     */
     protected void runQueryAllStatusTaskList(boolean adOnly, Set<String> blacklist) {
-        if (Status.hasFlagToday(FLAG_SIGN_PAGE_TASK_FAILED)) {
-            Log.i(TAG, "今日可领任务列表获取失败(风控)，跳过");
-            return;
-        }
         JSONObject jo = fetchQueryAllStatusTaskList(false);
         if (jo == null) {
             return;
         }
-        boolean doubleCheck;
-        int recheck = 0;
-        do {
-            doubleCheck = processQueryAllStatusTaskList(jo, adOnly, blacklist);
-            if (!doubleCheck) {
-                break;
-            }
-            if (++recheck > MAX_RECHECK_ROUNDS) {
-                Log.i(TAG, "可领任务列表重拉达到上限，本轮停止");
-                break;
-            }
-            jo = fetchQueryAllStatusTaskList(true);
-        }
-        while (jo != null);
+        // 与 signPageTaskList 同理：一轮只取一次，复查刷新留到下一轮
+        processQueryAllStatusTaskList(jo, adOnly, blacklist);
     }
 
     /**
@@ -154,6 +134,9 @@ public abstract class BaseAntMember extends ModelTask {
     private JSONObject fetchSignPageTaskList(boolean force) {
         String uid = UserIdMap.getCurrentUid();
         long now = System.currentTimeMillis();
+        if (!force && isFetchCoolingDown()) {
+            return null;
+        }
         if (!force && cachedSignPage != null && Objects.equals(cacheUid, uid) && (now - cacheTime) < CACHE_TTL) {
             return cachedSignPage;
         }
@@ -172,7 +155,16 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject jo = new JSONObject(rawJson);
             TimeUtil.sleep(500);
             if (!MessageUtil.checkResultCode(TAG + " signPageTaskList", jo)) {
-                handleFetchFailure("接口返回失败");
+                // 复查刷新(force)失败通常是限流 1009：本轮任务已处理过，不该因此累计失败、更不该锁掉当天
+                if (force) {
+                    Log.i(TAG, "会员任务列表复查刷新失败，沿用本轮结果");
+                } else if (isRiskControl(jo)) {
+                    // 1009 是服务端限流：命中后通常持续数小时，重试只会延长风控窗口，当日直接停手
+                    Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+                    Log.record("会员任务⏭️任务列表被限流(1009)，今日不再重试");
+                } else {
+                    handleFetchFailure("接口返回失败");
+                }
                 return null;
             }
             // 成功后清掉计数：只有「连续」失败才按风控处理，零星失败不该累积
@@ -186,7 +178,9 @@ public abstract class BaseAntMember extends ModelTask {
             return jo;
         } catch (Throwable t) {
             Log.err(TAG, "signPageTaskList err:", t);
-            handleFetchFailure("请求异常");
+            if (!force) {
+                handleFetchFailure("请求异常");
+            }
             return null;
         }
     }
@@ -199,12 +193,63 @@ public abstract class BaseAntMember extends ModelTask {
     private void handleFetchFailure(String reason) {
         int failures = Status.getIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL) + 1;
         Status.setIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL, failures);
+        // 冷却落盘：只约束 signPageTaskList 自身；queryAllStatusTaskList 有独立的限流标记，不再受它牵连
+        Status.setIntFlagToday(INT_FLAG_FETCH_COOLDOWN,
+                (int) (System.currentTimeMillis() / 1000) + FETCH_FAIL_COOLDOWN_SEC);
         if (failures >= MAX_FETCH_FAILURES) {
             Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
             Log.record("会员任务⏭️任务列表连续" + failures + "次获取失败(" + reason + ")，今日不再重试");
         } else {
-            Log.i(TAG, "任务列表获取失败(" + reason + ")，第" + failures + "/" + MAX_FETCH_FAILURES + "次，稍后重试");
+            Log.i(TAG, "任务列表获取失败(" + reason + ")，第" + failures + "/" + MAX_FETCH_FAILURES + "次，冷却"
+                    + (FETCH_FAIL_COOLDOWN_SEC / 60) + "分钟后重试");
         }
+    }
+
+    /** 服务端限流(1009「人气太旺」)：字段名各接口不统一，逐个兜一遍 */
+    private static boolean isRiskControl(JSONObject jo) {
+        if (jo == null) {
+            return false;
+        }
+        String[] fields = {"error", "errorTip", "code", "resultCode"};
+        for (String field : fields) {
+            if ("1009".equals(jo.optString(field, ""))) {
+                return true;
+            }
+        }
+        String msg = jo.optString("errorMessage", "");
+        return msg.contains("人气太旺");
+    }
+
+    /** 失败冷却期：直接跳过，不再发请求 */
+    private boolean isFetchCoolingDown() {
+        int until = Status.getIntFlagToday(INT_FLAG_FETCH_COOLDOWN);
+        if (until <= 0) {
+            return false;
+        }
+        if (System.currentTimeMillis() / 1000 < until) {
+            Log.i(TAG, "会员任务列表限流冷却中，本轮跳过");
+            return true;
+        }
+        return false;
+    }
+
+    /** 跳过原因每日只记一次：排查「列表里有任务却一个都没做」时够用，又不至于每轮刷屏 */
+    private void logSkipOnce(String flag, String message) {
+        if (Status.hasFlagToday(flag)) {
+            return;
+        }
+        Status.flagToday(flag);
+        Log.i(TAG, message);
+    }
+
+    /**
+     * queryAllStatusTaskList 的成功判定。
+     * <p>该接口成功时只返回 {@code ariverRpcTraceId} + {@code availableTaskList}，没有 {@code success}
+     * 也没有 {@code resultCode}，用通用的 {@link MessageUtil#checkResultCode} 会一律判失败。
+     * 故以业务字段为准：无列表且不符合通用成功响应（如 1009 风控）时才算失败。
+     */
+    private static boolean isQueryAllTaskListOk(JSONObject jo) {
+        return jo.has("availableTaskList") || MessageUtil.checkResultCode(jo);
     }
 
     /**
@@ -213,11 +258,14 @@ public abstract class BaseAntMember extends ModelTask {
     private JSONObject fetchQueryAllStatusTaskList(boolean force) {
         String uid = UserIdMap.getCurrentUid();
         long now = System.currentTimeMillis();
-        if (!force && cachedQueryAll != null && Objects.equals(cacheUid, uid) && (now - cacheTime) < CACHE_TTL) {
-            return cachedQueryAll;
-        }
-        if (Status.hasFlagToday(FLAG_SIGN_PAGE_TASK_FAILED)) {
+        // 不共用 signPageTaskList 的冷却窗口：那个窗口由它的失败写入，
+        // 共用会把可领任务列表一起拖停，正是解耦要避免的情况。
+        if (Status.hasFlagToday(FLAG_QUERY_ALL_TASK_FAILED)) {
+            Log.i(TAG, "今日可领任务列表被限流，跳过");
             return null;
+        }
+        if (!force && cachedQueryAll != null && Objects.equals(cacheUid, uid) && (now - queryAllCacheTime) < CACHE_TTL) {
+            return cachedQueryAll;
         }
         // 当日可领任务已完成(列表为空)：后续轮次跳过，不再请求
         if (Status.hasFlagToday(FLAG_QUERY_ALL_TASK_DONE)) {
@@ -228,14 +276,20 @@ public abstract class BaseAntMember extends ModelTask {
             String rawJson = AntMemberRpcCall.queryAllStatusTaskList();
             JSONObject jo = new JSONObject(rawJson);
             TimeUtil.sleep(500);
-            if (!MessageUtil.checkResultCode(TAG, jo)) {
-                Log.i(TAG, "queryAllStatusTaskList 接口返回失败");
+            if (!isQueryAllTaskListOk(jo)) {
+                if (isRiskControl(jo)) {
+                    Status.flagToday(FLAG_QUERY_ALL_TASK_FAILED);
+                    Log.record("会员任务⏭️可领任务列表被限流(1009)，今日不再重试");
+                } else {
+                    Log.i(TAG, "queryAllStatusTaskList 接口返回失败: "
+                            + StringUtil.truncate(jo.toString(), 160));
+                }
                 return null;
             }
             // 成功响应即缓存(即使 availableTaskList 为空)，确保广告路径复用、不再重复请求；空列表由 process 处理
             cacheUid = uid;
             cachedQueryAll = jo;
-            cacheTime = now;
+            queryAllCacheTime = now;
             return jo;
         } catch (Throwable t) {
             Log.err(TAG, "queryAllStatusTaskList err:", t);
@@ -362,15 +416,17 @@ public abstract class BaseAntMember extends ModelTask {
         try {
             for (int i = 0; i < taskList.length(); i++) {
                 JSONObject task = taskList.getJSONObject(i);
+                // 必须用 |= ：写成 doubleCheck = doubleCheck || doBrowseTask(...) 时，
+                // 前一个任务成功后右侧被短路，列表里后续任务不再执行
                 if (task.optBoolean("hybrid")) {
                     int periodCurrentCount = Integer.parseInt(task.getJSONObject("extInfo").getString("PERIOD_CURRENT_COUNT"));
                     int periodTargetCount = Integer.parseInt(task.getJSONObject("extInfo").getString("PERIOD_TARGET_COUNT"));
                     int count = periodTargetCount > periodCurrentCount ? periodTargetCount - periodCurrentCount : 0;
                     if (count > 0) {
-                        doubleCheck = doubleCheck || doBrowseTask(task, periodTargetCount, periodTargetCount, adOnly, blacklist);
+                        doubleCheck |= doBrowseTask(task, periodTargetCount, periodTargetCount, adOnly, blacklist);
                     }
                 } else {
-                    doubleCheck = doubleCheck || doBrowseTask(task, 1, 1, adOnly, blacklist);
+                    doubleCheck |= doBrowseTask(task, 1, 1, adOnly, blacklist);
                 }
             }
         } catch (Throwable t) {
@@ -397,6 +453,7 @@ public abstract class BaseAntMember extends ModelTask {
             }
             //黑名单任务跳过
             if (blacklist.contains(name)) {
+                logSkipOnce("antmember::skipBlack::" + name, label + "⏭️跳过[" + name + "]#在黑名单");
                 return false;
             }
             Long id = config.has("id") ? config.optLong("id") : config.optLong("configId");
@@ -418,8 +475,9 @@ public abstract class BaseAntMember extends ModelTask {
                     return false;
                 }
             } else {
-                // 会员路径：广告任务交给广告路径处理，这里跳过
+                // 会员路径：广告任务交给广告路径处理，这里跳过；广告路径未开启时任务会被静默丢弃，留一条当日痕迹
                 if (isAd) {
+                    logSkipOnce("antmember::skipAdRoute::" + name, label + "⏭️跳过[" + name + "]#属广告任务，交广告路径处理");
                     return false;
                 }
             }
@@ -448,6 +506,8 @@ public abstract class BaseAntMember extends ModelTask {
                 JSONObject jo = new JSONObject(AntMemberRpcCall.applyTask(name, id));
                 TimeUtil.sleep(300);
                 if (!MessageUtil.checkResultCode(TAG, jo)) {
+                    logSkipOnce("antmember::applyFail::" + name, label + "⏭️跳过[" + name + "]#申请失败: "
+                            + StringUtil.truncate(jo.toString(), 160));
                     //检查并标记黑名单任务
                     MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", name, jo);
                     continue;
@@ -464,6 +524,8 @@ public abstract class BaseAntMember extends ModelTask {
                 jo = new JSONObject(AntMemberRpcCall.executeTask(bizParam, bizSubType));
                 TimeUtil.sleep(300);
                 if (!MessageUtil.checkResultCode(TAG, jo)) {
+                    logSkipOnce("antmember::execFail::" + name, label + "⏭️跳过[" + name + "]#上报失败: "
+                            + StringUtil.truncate(jo.toString(), 160));
                     //检查并标记黑名单任务
                     MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", name, jo);
                     continue;
