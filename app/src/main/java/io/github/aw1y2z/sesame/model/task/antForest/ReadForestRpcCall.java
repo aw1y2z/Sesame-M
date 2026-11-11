@@ -10,15 +10,21 @@ import android.util.DisplayMetrics;
 import org.json.JSONObject;
 import io.github.aw1y2z.sesame.hook.ApplicationHook;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.ConnectionPool;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 /**
  * 森林无纸阅读 HTTP 客户端: 直连 https://m.zhangwenwh.com/api (小程序自有网关, 不走支付宝RPC)
@@ -28,6 +34,29 @@ public final class ReadForestRpcCall {
     private static final String DEFAULT_VERSION = "0.2.2410251510.53";
     private static final String HOST = "https://m.zhangwenwh.com/api";
     private static final Random RANDOM = new Random();
+    private static final MediaType JSON = MediaType.parse("application/json;charset=UTF-8");
+    /** 网关偶发长时间无响应，读超时收紧到 12s：宁可失败换书，也不要卡死整轮 */
+    private static final int CONNECT_TIMEOUT = 5;
+    private static final int READ_TIMEOUT = 12;
+    private static final int CALL_TIMEOUT = 15;
+    /** set_read_recently 只影响"最近阅读"展示，失败也无所谓，给它独立的 4s 短超时 */
+    private static final int SHORT_READ_TIMEOUT = 4;
+    private static final int SHORT_CALL_TIMEOUT = 6;
+
+    /** 全程共用同一个 Client：内部连接池复用 keep-alive，省掉每请求一次 TLS 握手 */
+    private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
+            .connectionPool(new ConnectionPool(4, 5, TimeUnit.MINUTES))
+            .connectTimeout(CONNECT_TIMEOUT, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT, TimeUnit.SECONDS)
+            .callTimeout(CALL_TIMEOUT, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build();
+
+    /** 短超时 Client：newBuilder 复用同一个连接池，与主 Client 共享 keep-alive 连接 */
+    private static final OkHttpClient SHORT_CLIENT = CLIENT.newBuilder()
+            .readTimeout(SHORT_READ_TIMEOUT, TimeUnit.SECONDS)
+            .callTimeout(SHORT_CALL_TIMEOUT, TimeUnit.SECONDS)
+            .build();
 
     private ReadForestRpcCall() {
     }
@@ -51,7 +80,7 @@ public final class ReadForestRpcCall {
         return get("/index/index?type=1", token, getReferer(version, null, null));
     }
 
-    /* 章节内容: chapterId为空取第一章, 否则按chapter_id取下一章(抓包确认小程序翻页用chapter_id, chapter_num始终为空) */
+    /* 章节内容: chapterId为空取第一章, 否则按chapter_id取下一章 */
     public static String getChapter(String bookId, String chapterId, String token, String version) throws Exception {
         String path;
         if (chapterId == null || chapterId.length() == 0) {
@@ -76,13 +105,13 @@ public final class ReadForestRpcCall {
         return post("/user/updateWel", body, token, getReferer(version, bookId, chapterId));
     }
 
-    /* 上报最近阅读(书名/章节名) */
+    /* 上报最近阅读(书名/章节名): 只影响展示, 失败无损失, 走短超时客户端 */
     public static String setReadRecently(String bookId, String chapterId, String chapterName, String token, String version) throws Exception {
         JSONObject body = new JSONObject();
         body.put("book_id", bookId);
         putChapterId(body, chapterId);
         body.put("chapter_name", chapterName);
-        return post("/book/set_read_recently", body, token, getReferer(version, bookId, chapterId));
+        return postShort("/book/set_read_recently", body, token, getReferer(version, bookId, chapterId));
     }
 
     private static void putChapterId(JSONObject body, String chapterId) throws Exception {
@@ -112,7 +141,7 @@ public final class ReadForestRpcCall {
     }
 
     /**
-     * 动态拼装 User-Agent，按小程序真实请求头对齐（抓包确认）：
+     * 动态拼装 User-Agent，按小程序真实请求头对齐：
      * 设备/系统/Chrome 取自系统 http.agent；MYWeb/nt/ws 等按真实格式追加，不再带 ChannelId。
      */
     private static String getBaseUserAgent() {
@@ -190,52 +219,57 @@ public final class ReadForestRpcCall {
     }
 
     private static String get(String path, String token, String referer) throws Exception {
-        return request("GET", path, null, token, referer);
+        return execute(CLIENT, "GET", path, null, token, referer);
     }
 
     private static String post(String path, JSONObject body, String token, String referer) throws Exception {
-        return request("POST", path, body == null ? "{}" : body.toString(), token, referer);
+        return execute(CLIENT, "POST", path, body == null ? "{}" : body.toString(), token, referer);
     }
 
-    private static String request(String method, String path, String body, String token, String referer) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(HOST + path).openConnection();
-        boolean completed = false;
-        try {
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(20000);
-            conn.setRequestMethod(method);
-            conn.setUseCaches(false);
-            for (Map.Entry<String, String> entry : getHeaders(token, referer).entrySet()) {
-                conn.setRequestProperty(entry.getKey(), entry.getValue());
+    private static String postShort(String path, JSONObject body, String token, String referer) throws Exception {
+        return execute(SHORT_CLIENT, "POST", path, body == null ? "{}" : body.toString(), token, referer);
+    }
+
+    /**
+     * 单次请求：共用连接池，正常读完由 OkHttp 自动回池，异常连接自动丢弃。
+     * 4xx/5xx 也返回响应体文本（与原先读 errorStream 的行为一致），业务层按 code 判断。
+     */
+    private static String execute(OkHttpClient client, String method, String path, String body, String token, String referer) throws Exception {
+        Request.Builder builder = new Request.Builder().url(HOST + path);
+        for (Map.Entry<String, String> entry : getHeaders(token, referer).entrySet()) {
+            builder.addHeader(entry.getKey(), entry.getValue());
+        }
+        if ("POST".equals(method)) {
+            builder.post(RequestBody.create(body == null ? "" : body, JSON));
+        } else {
+            builder.get();
+        }
+        try (Response response = client.newCall(builder.build()).execute()) {
+            ResponseBody responseBody = response.body();
+            return responseBody == null ? "" : responseBody.string();
+        } catch (IOException e) {
+            throw asTimeoutException(e);
+        }
+    }
+
+    /**
+     * OkHttp 的读超时/CallTimeout 可能抛 InterruptedIOException，
+     * 统一成 SocketTimeoutException，让上层继续按「超时降级」处理，不必区分异常类型。
+     */
+    private static Exception asTimeoutException(IOException e) {
+        for (Throwable cur = e; cur != null; cur = cur.getCause()) {
+            if (cur instanceof SocketTimeoutException) {
+                return (SocketTimeoutException) cur;
             }
-            if ("POST".equals(method)) {
-                byte[] bytes = (body == null ? "" : body).getBytes(StandardCharsets.UTF_8);
-                conn.setDoOutput(true);
-                conn.setFixedLengthStreamingMode(bytes.length);
-                OutputStream os = conn.getOutputStream();
-                os.write(bytes);
-                os.close();
+            if (cur instanceof InterruptedIOException || "timeout".equalsIgnoreCase(cur.getMessage())) {
+                SocketTimeoutException timeout = new SocketTimeoutException(cur.getMessage() == null ? "timeout" : cur.getMessage());
+                timeout.initCause(cur);
+                return timeout;
             }
-            InputStream is = conn.getResponseCode() >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            if (is == null) {
-                completed = true;
-                return "";
-            }
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int len;
-            while ((len = is.read(buffer)) != -1) {
-                baos.write(buffer, 0, len);
-            }
-            is.close();
-            completed = true;
-            return baos.toString("UTF-8");
-        } finally {
-            // 正常读完不 disconnect：连接会回到 keep-alive 池，相邻请求接着复用，省掉每请求一次 TLS 握手。
-            // 只有异常中断的连接不可复用，此时必须断开，否则一直占着句柄。
-            if (!completed) {
-                conn.disconnect();
+            if (cur.getCause() == cur) {
+                break;
             }
         }
+        return e;
     }
 }
