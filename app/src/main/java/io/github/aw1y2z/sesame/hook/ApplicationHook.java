@@ -316,6 +316,9 @@ public class ApplicationHook extends XposedModule {
                 hooked = true;
             }
             classLoader = lpparam.classLoader;
+            // 持锁标记「宿主主进程在运行」：模块 App 删账号前靠它判断，
+            // 宿主活着的时候不能删（注入进程会把账号目录立刻写回来）
+            FileUtil.acquireHostLock();
             // 兜底：若 onModuleLoaded 未先行打印（理论上不会），这里补上加载起点标记，
             // 保证每个主进程加载周期有且仅有一条"模块初始化开始"
             if (!initStartLogged) {

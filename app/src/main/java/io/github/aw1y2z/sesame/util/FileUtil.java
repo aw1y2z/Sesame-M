@@ -7,6 +7,8 @@ import io.github.aw1y2z.sesame.hook.Toast;
 import io.github.aw1y2z.sesame.model.normal.base.BaseModel;
 import java.io.*;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -111,6 +113,151 @@ public class FileUtil {
         String todayDate = dateFormat.format(new Date());
         // 对比日期字符串
         return fileDate.equals(todayDate);
+    }
+    
+    /**
+     * 彻底删除一个账号：数据目录、滚动备份、旧版单文件配置。
+     * <p>不保留任何「已删除」记录：该账号再次登录时目录会被正常重建，重新出现在列表里。
+     * <p>序号（accountIndex.json）故意不回收——历史日志里的「账号N」必须仍指向该账号。
+     */
+    public static boolean deleteAccount(String userId) {
+        if (!isSafeUserId(userId)) {
+            return false;
+        }
+        boolean ok = deleteRecursively(new File(CONFIG_DIRECTORY_FILE, userId));
+        File[] backups = getBackupDirectoryFile().listFiles();
+        if (backups != null) {
+            String prefix = BACKUP_FILE_PREFIX + userId + "_";
+            for (File backup : backups) {
+                if (backup.isFile() && backup.getName().startsWith(prefix) && !backup.delete()) {
+                    ok = false;
+                }
+            }
+        }
+        // 旧版未分目录的配置：留着的话下次加载会把它迁移回来
+        File legacyFile = new File(CONFIG_DIRECTORY_FILE, "config_v2-" + userId + ".json");
+        if (legacyFile.exists() && !legacyFile.delete()) {
+            ok = false;
+        }
+        return ok;
+    }
+    
+    /** 递归删除目录/文件；不存在视为成功 */
+    private static boolean deleteRecursively(File file) {
+        if (file == null || !file.exists()) {
+            return true;
+        }
+        boolean ok = true;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    ok = deleteRecursively(child) && ok;
+                }
+            }
+        }
+        return file.delete() && ok;
+    }
+    
+    // ===== 宿主进程存活探测（文件锁）=====
+    /** 注入进程启动时对 main 目录下这个文件加独占锁并一直持有，进程退出后由内核自动释放 */
+    private static final String HOST_LOCK_FILE_NAME = "host.lock";
+    private static RandomAccessFile hostLockRaf;
+    private static FileLock hostLock;
+    
+    public static File getHostLockFile() {
+        return new File(MAIN_DIRECTORY_FILE, HOST_LOCK_FILE_NAME);
+    }
+    
+    /**
+     * 宿主（支付宝）主进程是否仍在运行。
+     * <p>注入进程在 {@code ApplicationHook} 里对 host.lock 加独占锁，进程被杀后内核自动释放，
+     * 所以「锁能被拿到」等价于「宿主没在跑」。宿主运行期间它的注入进程会不断重写账号目录，
+     * 此时删账号一定会被写回来，删除操作必须先挡掉。
+     */
+    public static boolean isHostRunning() {
+        File lockFile = getHostLockFile();
+        RandomAccessFile raf = null;
+        FileChannel channel = null;
+        FileLock lock = null;
+        try {
+            File dir = lockFile.getParentFile();
+            if (dir != null && !dir.exists()) {
+                dir.mkdirs();
+            }
+            raf = new RandomAccessFile(lockFile, "rw");
+            channel = raf.getChannel();
+            lock = channel.tryLock();
+            return lock == null;
+        } catch (OverlappingFileLockException e) {
+            // 本进程已持有（正常不会发生），按「在运行」处理更安全
+            return true;
+        } catch (Throwable t) {
+            Log.printStackTrace(TAG, t);
+            // 探测不了就当作在运行：宁可拒绝删除，也不要删了又被写回来
+            return true;
+        } finally {
+            if (lock != null) {
+                try {
+                    lock.release();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (channel != null) {
+                try {
+                    channel.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+    
+    /**
+     * 注入进程侧调用：抢占 host.lock 并持有到进程结束，供模块 App 判断宿主是否在运行。
+     * <p>只在宿主主进程调用（写账号数据的也只有主进程）。
+     */
+    public static synchronized void acquireHostLock() {
+        if (hostLock != null) {
+            return;
+        }
+        // 模块 App 恰好在这一瞬间做探测时会短暂占锁，重试几次即可
+        for (int i = 0; i < 3 && hostLock == null; i++) {
+            RandomAccessFile raf = null;
+            try {
+                File lockFile = getHostLockFile();
+                File dir = lockFile.getParentFile();
+                if (dir != null && !dir.exists()) {
+                    dir.mkdirs();
+                }
+                raf = new RandomAccessFile(lockFile, "rw");
+                FileLock lock = raf.getChannel().tryLock();
+                if (lock != null) {
+                    hostLockRaf = raf;
+                    hostLock = lock;
+                    return;
+                }
+            } catch (Throwable t) {
+                Log.printStackTrace(TAG, t);
+            }
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            try {
+                Thread.sleep(30);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
     
     /**
