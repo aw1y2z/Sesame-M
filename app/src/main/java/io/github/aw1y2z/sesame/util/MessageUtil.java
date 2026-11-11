@@ -323,6 +323,7 @@ public class MessageUtil {
         BLACKLIST_LIST_TARGETS.put("MonopolyTaskList", new String[]{"AntForestV2", "新版保护地任务"});
         BLACKLIST_LIST_TARGETS.put("AntFarmDoFarmTaskList", new String[]{"AntFarm", "庄园饲料任务"});
         BLACKLIST_LIST_TARGETS.put("AntFarmDrawMachineTaskList", new String[]{"AntFarm", "庄园装扮抽抽乐任务"});
+        BLACKLIST_LIST_TARGETS.put("AntKitchenTaskList", new String[]{"AntFarm", "小鸡大厨任务"});
         BLACKLIST_LIST_TARGETS.put("AntDodoTaskList", new String[]{"AntDodo", "神奇物种任务"});
         BLACKLIST_LIST_TARGETS.put("AntOceanAntiepTaskList", new String[]{"AntOcean", "神奇海洋普通任务"});
         BLACKLIST_LIST_TARGETS.put("AntOceanFishBlackList", new String[]{"AntOcean", "神奇海洋去摸鱼任务"});

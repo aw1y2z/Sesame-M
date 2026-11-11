@@ -11,6 +11,7 @@ import io.github.aw1y2z.sesame.util.idMap.AnimalIdMap;
 import io.github.aw1y2z.sesame.util.idMap.AntDodoTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDoFarmTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDrawMachineTaskListMap;
+import io.github.aw1y2z.sesame.util.idMap.AntKitchenTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntForestHuntTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntForestVitalityTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
@@ -77,6 +78,7 @@ public final class ConfigPreload {
         AntForestHuntTaskListMap.load();
         AntFarmDoFarmTaskListMap.load();
         AntFarmDrawMachineTaskListMap.load();
+        AntKitchenTaskListMap.load();
         AntDodoTaskListMap.load();
         AntOceanAntiepTaskListMap.load();
         AntOceanFishBlackListMap.load();

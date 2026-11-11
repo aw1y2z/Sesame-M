@@ -353,8 +353,23 @@ public class AntFarmRpcCall {
         return ApplicationHook.requestString("com.alipay.antfarm.cook", "[{\"requestType\":\"RPC\"," + "\"sceneCode" + "\":\"ANTFARM\",\"source\":\"antfarmzuofanrw\"," + "\"userId\":\"" + userId + "\",\"version" + "\":\"unknown\"}]");
     }
 
-    public static String useFarmFood(String cookbookId, String cuisineId) {
-        return ApplicationHook.requestString("com.alipay.antfarm.useFarmFood", "[{\"cookbookId\":\"" + cookbookId + "\",\"cuisineId\":\"" + cuisineId + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ANTFARM\"," + "\"source\":\"chInfo_ch_appcenter__chsub_9patch\",\"useCuisine\":true," + "\"version" + "\":\"" + VERSION + "\"}]");
+    /**
+     * 使用美食喂鸡。
+     * <p>厨房赛季菜必须带上 {@code cuisineType}（如 AI_KITCHEN）与 {@code resultLevel}（菜品评级，如 BAD）：
+     * 服务端靠这两个字段定位赛季食谱，缺了它们一律回 U05「食谱未配置」。老菜谱传空串即可，参数与原先一致。
+     */
+    public static String useFarmFood(String cookbookId, String cuisineId, String cuisineType, String resultLevel) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[{\"cookbookId\":\"").append(cookbookId).append("\",\"cuisineId\":\"").append(cuisineId).append("\"");
+        if (cuisineType != null && !cuisineType.isEmpty()) {
+            sb.append(",\"cuisineType\":\"").append(cuisineType).append("\"");
+        }
+        sb.append(",\"requestType\":\"NORMAL\"");
+        if (resultLevel != null && !resultLevel.isEmpty()) {
+            sb.append(",\"resultLevel\":\"").append(resultLevel).append("\"");
+        }
+        sb.append(",\"sceneCode\":\"ANTFARM\",\"source\":\"chInfo_ch_appcenter__chsub_9patch\",\"useCuisine\":true,\"version\":\"").append(VERSION).append("\"}]");
+        return ApplicationHook.requestString("com.alipay.antfarm.useFarmFood", sb.toString());
     }
 
     public static String collectKitchenGarbage() {

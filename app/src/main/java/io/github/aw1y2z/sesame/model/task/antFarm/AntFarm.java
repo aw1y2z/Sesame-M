@@ -4,6 +4,7 @@ import android.os.Build;
 
 import io.github.aw1y2z.sesame.entity.AlipayAntFarmDoFarmTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayAntFarmDrawMachineTaskList;
+import io.github.aw1y2z.sesame.entity.AlipayAntKitchenTaskList;
 import io.github.aw1y2z.sesame.entity.GameCenterMallItem;
 import io.github.aw1y2z.sesame.model.task.antGame.GameTask;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDoFarmTaskListMap;
@@ -47,6 +48,13 @@ public class AntFarm extends ModelTask {
     private static final int MAX_FAMILY_SHARE_ATTEMPT = 3;
     /** 雇佣NPC：当天已处理过的 NPC 标记前缀（后接枚举名）；农场同时只有一只 NPC，按天标记避免每轮遣返重雇 */
     private static final String FLAG_HIRE_NPC_DONE = "antFarm::hireNpcDone::";
+
+    /**
+     * 喂鸡「使用美食」：当天被服务端判定"食谱未配置"的菜品标记前缀（后接 cuisineId）。
+     * <p>这类菜是服务端没配喂鸡效果（厨房赛季菜上线初期常见），发了只会回 U05；
+     * 按天记忆后不再重复发，第二天自动重试——服务端配好后无需改代码就能喂上。
+     */
+    private static final String FLAG_UNUSABLE_CUISINE = "antFarm::unusableCuisineV2::";
 
     /**
      * 公益捐蛋当日标记：当天已经捐过一次公益蛋。只归「每日捐蛋」自己用。
@@ -153,6 +161,11 @@ public class AntFarm extends ModelTask {
     private BooleanModelField gameCenterBuyMallItem;
     private SelectAndCountModelField gameCenterBuyMallItemList;
     private BooleanModelField kitchen;
+    private BooleanModelField aiKitchen;                       // 小鸡大厨(AI 厨房)
+    private BooleanModelField aiKitchenCook;                   // 小鸡大厨 | 自动做美食
+    private BooleanModelField aiKitchenFinishTask;             // 小鸡大厨 | 自动完成任务
+    private BooleanModelField AutoAntKitchenTaskList;          // 小鸡大厨 | 自动黑名单
+    private SelectModelField AntKitchenTaskList;               // 小鸡大厨 | 黑名单列表
     private BooleanModelField useSpecialFood;
     @Getter
     private IntegerModelField useSpecialFoodCountLimit;
@@ -253,6 +266,14 @@ public class AntFarm extends ModelTask {
         // 兑奖次数下限设为 1：勾选即至少兑奖 1 次，避免默认 0 导致勾选不生效
         modelFields.addField(gameCenterBuyMallItemList = new SelectAndCountModelField("gameCenterBuyMallItemList", "小鸡乐园 | 兑奖", new LinkedHashMap<>(), GameCenterMallItem::getList, "请填写兑奖次数(每日)", 1, 100).setDependsOn("gameCenterBuyMallItem"));
         modelFields.addField(kitchen = new BooleanModelField("kitchen", "小鸡厨房", false));
+        modelFields.addField(aiKitchen = new BooleanModelField("aiKitchen", "小鸡大厨", false));
+        modelFields.addField(aiKitchenCook = new BooleanModelField("aiKitchenCook", "小鸡大厨 | 自动做美食", false)
+                .setDependsOn("aiKitchen"));
+        // 只申报浏览/签到类任务，充值、游戏、社交类不会自动做
+        modelFields.addField(aiKitchenFinishTask = new BooleanModelField("aiKitchenFinishTask", "小鸡大厨 | 自动完成任务", true)
+                .setDependsOn("aiKitchen"));
+        modelFields.addField(AutoAntKitchenTaskList = new BooleanModelField("AutoAntKitchenTaskList", "小鸡大厨 | 自动黑名单", true).setDependsOn("aiKitchen"));
+        modelFields.addField(AntKitchenTaskList = new SelectModelField("AntKitchenTaskList", "小鸡大厨 | 黑名单列表", new LinkedHashSet<>(), AlipayAntKitchenTaskList::getList).setDependsOn("AutoAntKitchenTaskList"));
         modelFields.addField(chickenDiary = new BooleanModelField("chickenDiary", "小鸡日记", false));
         modelFields.addField(harvestProduce = new BooleanModelField("harvestProduce", "收取爱心鸡蛋", false));
         modelFields.addField(receiveFarmToolReward = new BooleanModelField("receiveFarmToolReward", "收取道具奖励", false));
@@ -408,6 +429,12 @@ public class AntFarm extends ModelTask {
                 } else {
                     cook(ownerUserId);
                 }
+            }
+
+            // 小鸡大厨（AI 厨房）：与上面的小鸡厨房是两套独立玩法，逻辑在 AntKitchen
+            if (aiKitchen.getValue()) {
+                AntKitchen.execute(aiKitchenCook.getValue(), aiKitchenFinishTask.getValue(),
+                        AntKitchenTaskList.getValue(), AutoAntKitchenTaskList.getValue());
             }
 
             if (chickenDiary.getValue()) {
@@ -2628,9 +2655,22 @@ public class AntFarm extends ModelTask {
             String cuisineId = cuisine.getString("cuisineId");
             String name = cuisine.getString("name");
             int count = cuisine.getInt("count");
+            // 厨房赛季菜必须原样带上 cuisineType/resultLevel，否则服务端定位不到赛季食谱（回 U05 食谱未配置）
+            String cuisineType = cuisine.optString("cuisineType", "");
+            String resultLevel = cuisine.optString("resultLevel", "");
+            String unusableFlag = FLAG_UNUSABLE_CUISINE + cuisineId;
+            if (Status.hasFlagToday(unusableFlag)) {
+                // 当天已确认这道菜没配喂鸡食谱：不再发请求（厨房赛季菜配好后第二天自动就能喂）
+                return true;
+            }
             for (int j = 0; j < count; j++) {
-                JSONObject jo = new JSONObject(AntFarmRpcCall.useFarmFood(cookbookId, cuisineId));
+                JSONObject jo = new JSONObject(AntFarmRpcCall.useFarmFood(cookbookId, cuisineId, cuisineType, resultLevel));
                 if (!MessageUtil.checkMemo(TAG, jo)) {
+                    if (jo.optString("memo", "").contains("食谱未配置")) {
+                        // 只是这一道菜不在喂鸡食谱里：跳过它继续下一道，别让整轮就此停住
+                        Status.flagToday(unusableFlag);
+                        return true;
+                    }
                     return false;
                 }
                 double deltaProduce = jo.getJSONObject("foodEffect").getDouble("deltaProduce");

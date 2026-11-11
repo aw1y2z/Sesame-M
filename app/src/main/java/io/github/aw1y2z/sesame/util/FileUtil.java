@@ -541,6 +541,10 @@ public class FileUtil {
         return getFile(MAIN_DIRECTORY_FILE, "AntFarmDrawMachineTask.json");
     }
 
+    public static File getAntKitchenTaskListMapFile() {
+        return getFile(MAIN_DIRECTORY_FILE, "AntKitchenTask.json");
+    }
+
     public static File getAntDodoTaskListMapFile() {
         return getFile(MAIN_DIRECTORY_FILE, "AntDodoTask.json");
     }
