@@ -590,7 +590,8 @@ public class ApplicationHook extends XposedModule {
                                         Log.err(TAG, "execAtTime err:", e);
                                     }
 
-                                    execDelayedHandler(checkInterval);
+                                    // 只收能量窗口内要高频重收，不能按执行间隔整段跳过窗口
+                                    execDelayedHandler(getNextInterval(checkInterval));
                                     FileUtil.clearLog();
                                 } catch (Exception e) {
                                     Log.record("执行异常:");
@@ -1152,6 +1153,51 @@ public class ApplicationHook extends XposedModule {
         }
         startMainTask();
     };
+
+    /** 只收能量窗口内的重收间隔：好友能量 7:00 起陆续成熟，5 分钟一轮足够兜住 */
+    private static final long ENERGY_WINDOW_INTERVAL = 5 * 60 * 1000L;
+
+    /**
+     * 计算下一轮的排期延迟。平日按执行间隔；「只收能量时间」窗口内压到 5 分钟一轮，
+     * 窗口即将开始、下一轮会整段跳过窗口时，提前排到窗口开始后 1 分钟。
+     * <p>默认 06:55:30 那轮跑完后要按执行间隔（默认 50 分钟）等到 7:45，
+     * 7:00~7:31 陆续成熟的好友能量中间没有任何一次收取机会，
+     * 表现就是「早上那波完全不收能量」。
+     */
+    private static long getNextInterval(long checkInterval) {
+        List<String> ranges = BaseModel.getEnergyTime().getValue();
+        if (ranges == null || ranges.isEmpty() || checkInterval <= 0) {
+            return checkInterval;
+        }
+        long now = System.currentTimeMillis();
+        for (String range : ranges) {
+            if (range == null || !range.contains("-")) {
+                continue;
+            }
+            String[] parts = range.trim().split("-");
+            if (parts.length != 2) {
+                continue;
+            }
+            Calendar start = TimeUtil.getTodayCalendarByTimeStr(parts[0].trim());
+            Calendar end = TimeUtil.getTodayCalendarByTimeStr(parts[1].trim());
+            if (start == null || end == null) {
+                continue;
+            }
+            long startMillis = start.getTimeInMillis();
+            long endMillis = end.getTimeInMillis();
+            if (endMillis <= startMillis) {
+                // 跨天窗口（如 2359-0030）：结束时间落在次日
+                endMillis += TimeUnit.DAYS.toMillis(1);
+            }
+            if (now >= startMillis && now < endMillis) {
+                return Math.min(checkInterval, ENERGY_WINDOW_INTERVAL);
+            }
+            if (now < startMillis && startMillis - now < checkInterval) {
+                return startMillis - now + 60_000L;
+            }
+        }
+        return checkInterval;
+    }
 
     private static void execDelayedHandler(long delayMillis) {
         // 调度时立即记录下次执行时间，所有任务完成时 updateLastExecText 会一并写入

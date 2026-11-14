@@ -34,7 +34,9 @@ public enum GameTask {
     private final String channel;
     private final String version;
     private final int requestsPerEgg; // 完成1个🥚要多少次 为了防止网络崩溃 多加1次
-    private String cachedToken; // 缓存登录Token
+    private volatile String cachedToken; // 缓存登录Token
+    /** 上次登录成功的时刻：窗口内复用 Token，避免同一游戏每轮/每次上报都重新登录 */
+    private volatile long cachedTokenAt;
 
     /**
      * 外网游戏服的连接/读取超时。
@@ -42,6 +44,11 @@ public enum GameTask {
      */
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int READ_TIMEOUT_MS = 8_000;
+    /**
+     * Token 复用窗口：游戏服 Token 有效期远长于此，窗口内重复上报不必重新登录。
+     * <p>窗口设短是为了在 Token 真失效时尽快自愈——上报业务失败会清空缓存，下次调用即重新登录。
+     */
+    private static final long TOKEN_REUSE_MS = 5 * 60 * 1000L;
 
     /**
      * 根据小程序 appId 匹配游戏任务（金豆乐园游戏权益上报使用）
@@ -146,7 +153,9 @@ public enum GameTask {
                 JSONObject data = resJson.optJSONObject("data");
                 if (data != null) {
                     this.cachedToken = data.optString("token");
-                    Log.other("登录成功✅Token已获取");
+                    this.cachedTokenAt = System.currentTimeMillis();
+                    // 登录是过程信息（每个游戏各自登录一次），进运行日志，不占「其他记录」
+                    Log.record("登录成功✅Token已获取[" + title + "]");
                     return this.cachedToken;
                 }
             } else {
@@ -156,6 +165,21 @@ public enum GameTask {
             Log.error("登录过程🚨抛出异常:" + e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * 取 Token：窗口内复用，缓存为空或已过窗口才重新登录。
+     * <p>同一游戏一轮内可能上报多次（金豆乐园会连续多次 {@code reportSync}），原先每次都 login，
+     * 表现为「其他记录」里反复出现"Token已获取"。
+     */
+    private String ensureToken() {
+        if (cachedToken != null && !cachedToken.isEmpty()
+                && System.currentTimeMillis() - cachedTokenAt < TOKEN_REUSE_MS) {
+            return cachedToken;
+        }
+        cachedToken = login();
+        cachedTokenAt = System.currentTimeMillis();
+        return cachedToken;
     }
 
     /**
@@ -170,7 +194,7 @@ public enum GameTask {
                 Log.record("任务流程⚠️账号已切换，停止上报");
                 return;
             }
-            this.cachedToken = login();
+            this.cachedToken = ensureToken();
             if (this.cachedToken == null || this.cachedToken.isEmpty()) {
                  Log.error("无法获取⚠️有效的Token，放弃上报任务");
                 return;
@@ -238,7 +262,7 @@ public enum GameTask {
             return 0;
         }
         int maxReports = eggCount * this.requestsPerEgg;
-        this.cachedToken = login();
+        this.cachedToken = ensureToken();
         if (this.cachedToken == null || this.cachedToken.isEmpty()) {
             Log.error("无法获取⚠️有效的Token，放弃上报任务");
             return 0;
@@ -337,6 +361,8 @@ public enum GameTask {
                 }
                 return true;
             } else {
+                // Token 可能已失效：清缓存，下次调用重新登录（复用的前提是失败能自愈）
+                cachedToken = null;
                 Log.error("⚠️ 第 " + current + " 次上报业务失败 (HTTP " + respCode + "): " + responseText);
                 return false;
             }

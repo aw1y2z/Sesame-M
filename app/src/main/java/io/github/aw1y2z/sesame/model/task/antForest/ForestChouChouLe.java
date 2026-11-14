@@ -475,6 +475,10 @@ public class ForestChouChouLe {
                     ? AntForestRpcCall.finishTask4Chouchoule(taskType, taskSceneCode)
                     : AntForestRpcCall.finishTaskopengreen(taskType, taskSceneCode));
             if (!MessageUtil.checkSuccess(TAG, result)) {
+                // 已完结就不必再换另一个接口重报一遍
+                if (MessageUtil.isAlreadyDone(result)) {
+                    return Outcome.DONE;
+                }
                 result = new JSONObject(xlight
                         ? AntForestRpcCall.finishTaskopengreen(taskType, taskSceneCode)
                         : AntForestRpcCall.finishTask4Chouchoule(taskType, taskSceneCode));
@@ -483,6 +487,10 @@ public class ForestChouChouLe {
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntForestHuntTaskList", taskName, result);
             if (MessageUtil.checkSuccess(TAG, result)) {
                 Log.forest("森林寻宝🧾完成[" + taskName + "]");
+                return Outcome.DONE;
+            }
+            // 服务端答「任务已完结」：此前已上报成功，等价于完成，不要再走到「未完成」
+            if (MessageUtil.isAlreadyDone(result)) {
                 return Outcome.DONE;
             }
             if (MessageUtil.isRetryable(result) || MessageUtil.isServerBusy(result)) {
