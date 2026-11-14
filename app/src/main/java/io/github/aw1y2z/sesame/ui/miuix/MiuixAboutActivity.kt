@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.aw1y2z.sesame.R
+import io.github.aw1y2z.sesame.data.Agreement
 import io.github.aw1y2z.sesame.data.ViewAppInfo
 import io.github.aw1y2z.sesame.util.ToastUtil
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -97,10 +98,21 @@ fun AboutScreen(activity: MiuixAboutActivity) {
                     title = "在 GitHub 查看源码",
                     onClick = { openWebUrl(activity, "https://github.com/aw1y2z/Sesame-M") }
                 )
+                ArrowPreference(
+                    title = "用户协议",
+                    // 同意时间只落在本机，这里回读展示，顺带说明「同意的是哪一版」
+                    summary = "条款版本 ${Agreement.VERSION} · " +
+                            (Agreement.acceptedAtText()?.let { "同意于 $it" } ?: "未记录同意时间"),
+                    onClick = { openWebUrl(activity, TERMS_URL) }
+                )
             }
         }
     }
 }
+
+/** 条款文档地址：路径含中文，用百分号编码，避免个别浏览器或应用解析失败 */
+private const val TERMS_URL =
+    "https://github.com/aw1y2z/Sesame-M/blob/main/docs/%E5%90%88%E8%A7%84%E4%B8%8E%E5%85%8D%E8%B4%A3.md"
 
 private fun openWebUrl(activity: MiuixBaseActivity, url: String) {
     try {

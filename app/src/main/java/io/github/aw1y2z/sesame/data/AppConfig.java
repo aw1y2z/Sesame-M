@@ -58,6 +58,16 @@ public class AppConfig {
     private Boolean enableOnGoing = false;
     private Boolean closeCaptchaDialog = true;
 
+    /**
+     * 已同意的条款版本，与 {@link Agreement#VERSION} 比较，小于即需重新确认。
+     * <p>放在这里而不是 ConfigV2：协议是设备级状态，与账号无关，删账号不该导致重新弹窗。
+     * <p>⚠ 本文件位于公共目录，用户可手改；不做加密、不绑定安装标识——源码开源的前提下
+     * 那类「防伪」只增加维护与阅读成本，不改变结果。
+     */
+    private Integer agreementVersion = 0;
+    /** 同意时间戳（毫秒），仅本机记录、不上传，用于日后核对「同意的是哪一版、什么时候」 */
+    private Long agreementAcceptedAt = 0L;
+
     public Boolean getNewRpc() {
         return newRpc;
     }
@@ -161,6 +171,43 @@ public class AppConfig {
             return false;
         }
         return FileUtil.write2File(toSaveStr(), new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.json"));
+    }
+
+    /** 上次 load 是否解析失败；调用方据此判断能否走 {@link #forceSave()} */
+    public static boolean isLoadFailed() {
+        return loadFailed;
+    }
+
+    /**
+     * 忽略「上次加载失败」强制写盘，只在用户明确操作后必须落盘的场景使用（当前仅协议同意）。
+     * <p>常规 {@link #save()} 会拒绝写盘以保护用户配置；但协议页若因此永远写不进去，
+     * 用户就被锁死在门禁页、只能手动删文件。这里先写临时文件，再把损坏的旧文件改名备份，
+     * 最后替换——任一步失败都不会动到原文件。
+     *
+     * @return 是否写盘成功
+     */
+    public static synchronized Boolean forceSave() {
+        File target = new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.json");
+        File temp = new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.json.tmp");
+        if (!Boolean.TRUE.equals(FileUtil.write2File(toSaveStr(), temp))) {
+            Log.i(TAG, "强制写盘失败：临时文件未写入");
+            return false;
+        }
+        if (target.exists()) {
+            File backup = new File(APP_CONFIG_DIRECTORY_FILE, "appConfig.corrupt-" + System.currentTimeMillis() + ".json");
+            if (!target.renameTo(backup)) {
+                temp.delete();
+                Log.i(TAG, "强制写盘失败：损坏配置无法备份");
+                return false;
+            }
+            Log.i(TAG, "损坏配置已备份为 " + backup.getName());
+        }
+        if (!temp.renameTo(target)) {
+            Log.i(TAG, "强制写盘失败：临时文件替换失败");
+            return false;
+        }
+        loadFailed = false;
+        return true;
     }
 
     public static synchronized AppConfig load() {
